@@ -17,7 +17,7 @@ func TestTrimToRange_BetweenHeadings(t *testing.T) {
 		"line c",
 	}, "\n")
 
-	got, found := TrimToRange(content, "2.0.0", "1.0.0")
+	got, found := TrimToRange(content, "2.0.0", "1.0.0", false)
 	want := strings.Join([]string{
 		"## 2.0.0",
 		"line a",
@@ -40,7 +40,7 @@ func TestTrimToRange_InstalledHeadingMissing(t *testing.T) {
 	}
 	content := strings.Join(lines, "\n")
 
-	got, found := TrimToRange(content, "2.0.0", "1.0.0")
+	got, found := TrimToRange(content, "2.0.0", "1.0.0", false)
 
 	if !found {
 		t.Error("expected found = true")
@@ -65,7 +65,7 @@ func TestTrimToRange_NewVersionHeadingMissing(t *testing.T) {
 	}
 	content := strings.Join(lines, "\n")
 
-	got, found := TrimToRange(content, "9.9.9", "1.0.0")
+	got, found := TrimToRange(content, "9.9.9", "1.0.0", false)
 
 	if found {
 		t.Error("expected found = false when the new-version heading can't be located")
@@ -88,7 +88,7 @@ func TestTrimToRange_InstalledHeadingBeforeNewVersion(t *testing.T) {
 		"new stuff",
 	}, "\n")
 
-	got, found := TrimToRange(content, "2.0.0", "1.0.0")
+	got, found := TrimToRange(content, "2.0.0", "1.0.0", false)
 	want := "## 2.0.0\nnew stuff"
 
 	if !found {
@@ -105,7 +105,7 @@ func TestTrimToRange_EmptyInstalledVersion(t *testing.T) {
 		"line a",
 	}, "\n")
 
-	got, found := TrimToRange(content, "2.0.0", "")
+	got, found := TrimToRange(content, "2.0.0", "", false)
 	want := "## 2.0.0\nline a"
 
 	if !found {
@@ -122,7 +122,7 @@ func TestFindHeading_IgnoresNonHeadingLines(t *testing.T) {
 		"## 2.0.0 actual heading",
 	}
 
-	got := findHeading(lines, "2.0.0")
+	got := findHeading(lines, "2.0.0", false)
 	if got != 1 {
 		t.Errorf("got %d, want 1", got)
 	}
@@ -130,7 +130,47 @@ func TestFindHeading_IgnoresNonHeadingLines(t *testing.T) {
 
 func TestFindHeading_NotFound(t *testing.T) {
 	lines := []string{"## 1.0.0", "## 3.0.0"}
-	if got := findHeading(lines, "2.0.0"); got != -1 {
+	if got := findHeading(lines, "2.0.0", false); got != -1 {
 		t.Errorf("got %d, want -1", got)
+	}
+}
+
+func TestFindHeading_LaxMatchesUnmarkedLine(t *testing.T) {
+	lines := []string{"CHANGES FROM 1.0.0 TO 2.0.0", "* did a thing"}
+
+	if got := findHeading(lines, "2.0.0", false); got != -1 {
+		t.Errorf("strict: got %d, want -1 (no ATX/Setext heading present)", got)
+	}
+	if got := findHeading(lines, "2.0.0", true); got != 0 {
+		t.Errorf("lax: got %d, want 0", got)
+	}
+}
+
+func TestFindHeading_LaxIgnoresBlankLines(t *testing.T) {
+	lines := []string{"", "  ", "2.0.0 (2026-01-01)"}
+	if got := findHeading(lines, "2.0.0", true); got != 2 {
+		t.Errorf("got %d, want 2 (blank lines shouldn't match)", got)
+	}
+}
+
+func TestTrimToRange_LaxBetweenUnmarkedHeadings(t *testing.T) {
+	content := strings.Join([]string{
+		"2.0.0 (2026-01-01)",
+		"line a",
+		"1.0.0 (2025-01-01)",
+		"line b",
+	}, "\n")
+
+	got, found := TrimToRange(content, "2.0.0", "1.0.0", true)
+	want := strings.Join([]string{
+		"2.0.0 (2026-01-01)",
+		"line a",
+	}, "\n")
+
+	if !found {
+		t.Error("expected found = true")
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

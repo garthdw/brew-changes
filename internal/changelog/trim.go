@@ -20,10 +20,17 @@ const MaxContentLines = 100
 // question. In that case, the first MaxContentLines of content is returned
 // as a last resort, but callers may prefer to treat found=false as a
 // signal to fall back to another source (release notes, say).
-func TrimToRange(content, newVersion, installedVersion string) (string, bool) {
+//
+// lax relaxes heading detection to accept any non-blank line containing
+// the version (not just Markdown ATX/Setext headings) — for changelogs
+// like tmux's CHANGES or xz's NEWS, which mark version sections with plain
+// unmarked lines. It should only be enabled for formulae whose file format
+// has been checked, since it's more prone to matching a version mentioned
+// in body text rather than an actual section boundary.
+func TrimToRange(content, newVersion, installedVersion string, lax bool) (string, bool) {
 	lines := strings.Split(content, "\n")
 
-	startLine := findHeading(lines, newVersion)
+	startLine := findHeading(lines, newVersion, lax)
 	if startLine == -1 {
 		end := MaxContentLines
 		if end > len(lines) {
@@ -33,7 +40,7 @@ func TrimToRange(content, newVersion, installedVersion string) (string, bool) {
 		return result + fmt.Sprintf("\n\n... (couldn't locate version headings, showing first %d lines)", MaxContentLines), false
 	}
 
-	endLine := findHeading(lines, installedVersion)
+	endLine := findHeading(lines, installedVersion, lax)
 	if endLine != -1 && endLine > startLine {
 		return strings.Join(lines[startLine:endLine], "\n"), true
 	}
@@ -50,18 +57,21 @@ func TrimToRange(content, newVersion, installedVersion string) (string, bool) {
 	return result, true
 }
 
-// findHeading returns the index of the first markdown heading line
-// containing version, or -1 if none is found. Both ATX (`# text`) and
-// Setext (`text` underlined with `===`/`---`) headings are recognized,
-// since some changelogs (e.g. fzf, ripgrep) use the latter exclusively.
-func findHeading(lines []string, version string) int {
+// findHeading returns the index of the first heading line containing
+// version, or -1 if none is found. Both ATX (`# text`) and Setext (`text`
+// underlined with `===`/`---`) markdown headings are recognized, since
+// some changelogs (e.g. fzf, ripgrep) use the latter exclusively. When lax
+// is true, any non-blank line counts as a heading candidate, for
+// changelogs that mark version sections with plain unmarked lines.
+func findHeading(lines []string, version string, lax bool) int {
 	if version == "" {
 		return -1
 	}
 	for i, line := range lines {
 		isATX := strings.TrimLeft(line, "#") != line
 		isSetext := strings.TrimSpace(line) != "" && i+1 < len(lines) && isSetextUnderline(lines[i+1])
-		if (isATX || isSetext) && containsVersion(line, version) {
+		isHeading := isATX || isSetext || (lax && strings.TrimSpace(line) != "")
+		if isHeading && containsVersion(line, version) {
 			return i
 		}
 	}

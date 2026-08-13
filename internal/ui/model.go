@@ -29,9 +29,15 @@ type Item struct {
 	Repo      string // GitHub repo name
 
 	// ManualChangelogURL is a manually curated changelog/release-notes
-	// link (see internal/knownchangelogs) used when no GitHub repo could
+	// link (see internal/changelogconfig) used when no GitHub repo could
 	// be resolved automatically. Empty if none is known.
 	ManualChangelogURL string
+
+	// LaxHeadings relaxes version-heading matching for formulae recorded
+	// in internal/changelogconfig as needing it — e.g. a changelog file
+	// that marks version sections with plain, unmarked lines rather than
+	// Markdown headings.
+	LaxHeadings bool
 
 	Expanded     bool
 	Loading      bool
@@ -172,7 +178,7 @@ func resolveChangelogCmd(index int, it Item) tea.Cmd {
 // version.
 func fetchChangelogFileCmd(index int, it Item, filename string) tea.Cmd {
 	return func() tea.Msg {
-		section, ok := ghsource.FetchChangelogSection(it.Owner, it.Repo, filename, it.Current, it.Installed)
+		section, ok := ghsource.FetchChangelogSection(it.Owner, it.Repo, filename, it.Current, it.Installed, it.LaxHeadings)
 		if !ok {
 			return changelogResolvedMsg{index: index}
 		}

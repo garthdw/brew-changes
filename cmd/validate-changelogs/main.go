@@ -19,9 +19,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/garthdw/homebrew-changes/internal/changelogconfig"
 	"github.com/garthdw/homebrew-changes/internal/ghsource"
 	"github.com/garthdw/homebrew-changes/internal/homebrew"
-	"github.com/garthdw/homebrew-changes/internal/knownchangelogs"
 )
 
 type analyticsResponse struct {
@@ -36,7 +36,7 @@ type result struct {
 	source      string // "file:<name>", "releases", "no-repo", "skip-tap"
 	found       bool
 	skipped     bool
-	manual      bool // recovered via known_changelogs.json rather than auto-detection
+	manual      bool // recovered via changelog_config.json rather than auto-detection
 	note        string
 }
 
@@ -92,7 +92,7 @@ func main() {
 		if r.skipped || r.found {
 			continue
 		}
-		if url, ok := knownchangelogs.Lookup(r.name); ok {
+		if url, ok := changelogconfig.Lookup(r.name); ok {
 			r.manual = true
 			r.note = "manual: " + url
 		}
@@ -118,7 +118,7 @@ func main() {
 		}
 		fmt.Printf("%-6s %-20s %-30s %-18s %s\n", status, r.name, r.owner+"/"+r.repo, r.source, r.note)
 	}
-	fmt.Printf("\n%d/%d auto-detected ok, %d failed, %d recovered via known_changelogs.json, %d skipped\n",
+	fmt.Printf("\n%d/%d auto-detected ok, %d failed, %d recovered via changelog_config.json, %d skipped\n",
 		ok, ok+fail+manual, fail, manual, skip)
 }
 
@@ -211,7 +211,7 @@ func validate(name string, info homebrew.Info) result {
 	}
 
 	r.source = "file:" + filename
-	section, found := ghsource.FetchChangelogSection(owner, repo, filename, info.Version, "")
+	section, found := ghsource.FetchChangelogSection(owner, repo, filename, info.Version, "", changelogconfig.LaxHeadings(name))
 	r.found = found
 	if !found {
 		r.note = "version heading not located"

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/garthdw/homebrew-changes/internal/changelogconfig"
 	"github.com/garthdw/homebrew-changes/internal/ghsource"
 	"github.com/garthdw/homebrew-changes/internal/homebrew"
-	"github.com/garthdw/homebrew-changes/internal/knownchangelogs"
 	"github.com/garthdw/homebrew-changes/internal/ui"
 )
 
@@ -58,7 +58,7 @@ func run() error {
 		}
 
 		info := infos[pkg.Name]
-		manualChangelogURL, hasManualOverride := knownchangelogs.Lookup(pkg.Name)
+		manualChangelogURL, hasManualOverride := changelogconfig.Lookup(pkg.Name)
 
 		var owner, repo string
 		if !hasManualOverride {
@@ -74,6 +74,7 @@ func run() error {
 			Owner:              owner,
 			Repo:               repo,
 			ManualChangelogURL: manualChangelogURL,
+			LaxHeadings:        changelogconfig.LaxHeadings(pkg.Name),
 		})
 	}
 

@@ -144,12 +144,14 @@ func FetchChangelogFileAt(owner, repo, filename string) (content string, ok bool
 // like Node.js's root CHANGELOG.md, which just links out to per-major-
 // version files rather than documenting versions itself) — either way, the
 // caller should treat this source as unusable and fall back to another one.
-func FetchChangelogSection(owner, repo, filename, newVersion, installedVersion string) (section string, ok bool) {
+// lax relaxes version-heading matching for formulae recorded as needing it
+// in changelogconfig (see changelog.TrimToRange).
+func FetchChangelogSection(owner, repo, filename, newVersion, installedVersion string, lax bool) (section string, ok bool) {
 	content, ok := FetchChangelogFileAt(owner, repo, filename)
 	if !ok {
 		return "", false
 	}
-	return changelog.TrimToRange(content, newVersion, installedVersion)
+	return changelog.TrimToRange(content, newVersion, installedVersion, lax)
 }
 
 type repoContentEntry struct {
