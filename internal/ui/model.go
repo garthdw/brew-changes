@@ -81,20 +81,6 @@ type Result struct {
 	Items  []Item
 }
 
-var (
-	styleVersion   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	styleArrow     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	styleDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleHeader    = lipgloss.NewStyle().Bold(true)
-	styleSelected  = lipgloss.NewStyle().Bold(true)
-	styleError     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	styleBodyFrame = lipgloss.NewStyle().
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240")).
-			Padding(0, 1).
-			MarginLeft(2)
-)
-
 const (
 	headerLines = 2 // "Outdated packages:" + blank line
 	footerLines = 2 // blank line + keybinding hint
@@ -308,28 +294,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
+		action, _ := mainMap.Lookup(msg.String())
+		switch action {
+		case "quit":
 			m.quitting = true
 			return m, tea.Quit
 
-		case "up":
+		case "move-up":
 			m.moveCursor(-1)
 			m.refreshViewport()
 
-		case "down":
+		case "move-down":
 			m.moveCursor(1)
 			m.refreshViewport()
 
-		case "K":
-			m.moveCursor(-1)
-			m.refreshViewport()
-
-		case "J":
-			m.moveCursor(1)
-			m.refreshViewport()
-
-		case "k":
+		case "move-up-or-scroll-up":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
 				m.viewport.ScrollUp(1)
 			} else {
@@ -337,7 +316,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshViewport()
 			}
 
-		case "j":
+		case "move-down-or-scroll-down":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
 				m.viewport.ScrollDown(1)
 			} else {
@@ -345,7 +324,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshViewport()
 			}
 
-		case "enter":
+		case "toggle-expand":
 			if len(m.items) == 0 {
 				return m, nil
 			}
@@ -361,7 +340,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 			m.scrollToCursor()
 
-		case "o":
+		case "open-homepage":
 			if len(m.items) == 0 {
 				return m, nil
 			}
@@ -375,7 +354,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, openURL(url)
 
-		case "g":
+		case "open-github":
 			if len(m.items) == 0 {
 				return m, nil
 			}
@@ -385,7 +364,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, openURL(url)
 
-		case "a":
+		case "upgrade-all":
 			for i := range m.items {
 				if m.items[i].Upgrading {
 					return m, nil
@@ -394,7 +373,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.action = ActionUpgradeAll
 			return m, tea.Quit
 
-		case "u":
+		case "upgrade-current":
 			if len(m.items) == 0 {
 				return m, nil
 			}

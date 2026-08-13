@@ -1,0 +1,14 @@
+{
+  "chrome": {
+    "accent": { "color": "#00D787" },
+    "border": { "color": "#585858" },
+    "borderInactive": { "color": "#585858" },
+    "mutedText": { "color": "#585858" },
+    "error": { "color": "#FF0000" }
+  },
+  "groups": {
+    "chrome": {
+      "version": { "color": "#FFAF00" }
+    }
+  }
+}
