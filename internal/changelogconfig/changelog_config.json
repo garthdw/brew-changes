@@ -1,6 +1,7 @@
 {
   "_comment": "Per-formula overrides for brew-changes' changelog resolution. `url` is a manual override for formulae whose real changelog isn't reachable through GitHub auto-detection: most aren't GitHub-native (GNU/GNOME/language runtimes/etc, pointed at their own site or a self-hosted git). A few (pnpm, gemini-cli) DO have real GitHub repos with real Releases, but Homebrew's homepage/url fields don't reference GitHub, so ghsource.ResolveRepo can't find them automatically; those point straight at the repo's /releases page. Verified reachable (HTTP 200) as of 2026-08-07; re-verify periodically since upstream projects reorganize docs. `lax_headings` opts a formula whose changelog file IS found via normal GitHub auto-detection into a looser version-heading match: some files (tmux's CHANGES, xz's NEWS) mark version sections with plain, unmarked lines rather than Markdown ATX/Setext headings, which the default strict matcher can't locate.",
   "ansible": { "url": "https://github.com/ansible-community/ansible-build-data/blob/main/14/CHANGELOG-v14.rst" },
+  "automake": { "url": "https://git.savannah.gnu.org/cgit/automake.git/plain/NEWS" },
   "awscli": { "url": "https://github.com/aws/aws-cli/blob/v2/CHANGELOG.rst" },
   "bash": { "url": "https://git.savannah.gnu.org/cgit/bash.git/plain/NEWS" },
   "coreutils": { "url": "https://raw.githubusercontent.com/coreutils/coreutils/master/NEWS" },
@@ -12,6 +13,7 @@
   "git": { "url": "https://raw.githubusercontent.com/git/git/master/Documentation/RelNotes/2.55.0.adoc" },
   "glab": { "url": "https://gitlab.com/gitlab-org/cli/-/blob/main/CHANGELOG.md" },
   "glib": { "url": "https://gitlab.gnome.org/GNOME/glib/-/raw/main/NEWS" },
+  "gnu-tar": { "url": "https://git.savannah.gnu.org/cgit/tar.git/plain/NEWS" },
   "gnupg": { "url": "https://www.gnupg.org/download/index.html" },
   "go": { "url": "https://go.dev/doc/devel/release" },
   "graphviz": { "url": "https://gitlab.com/graphviz/graphviz/-/blob/main/CHANGELOG.md" },
@@ -41,5 +43,7 @@
   "ruby": { "url": "https://raw.githubusercontent.com/ruby/ruby/master/NEWS.md" },
   "rust": { "url": "https://github.com/rust-lang/rust/blob/master/RELEASES.md" },
   "tmux": { "lax_headings": true },
+  "tree": { "lax_headings": true },
+  "wget": { "url": "https://git.savannah.gnu.org/cgit/wget.git/plain/NEWS" },
   "xz": { "lax_headings": true }
 }
