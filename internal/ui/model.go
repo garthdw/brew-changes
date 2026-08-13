@@ -107,13 +107,24 @@ type model struct {
 	quitting  bool
 	action    Action
 	itemLines []int // line offset of each item's header within the rendered content
+
+	// bodyFrameCache memoizes styleBodyFrame.Render output per item index,
+	// keyed on the body content it was rendered from, so navigating the
+	// list doesn't re-run lipgloss border/padding rendering over large
+	// changelog bodies that haven't changed since the last keypress.
+	bodyFrameCache map[int]bodyFrame
+}
+
+type bodyFrame struct {
+	body     string
+	rendered string
 }
 
 func newModel(items []Item) model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = styleDim
-	return model{items: items, spinner: s}
+	return model{items: items, spinner: s, bodyFrameCache: make(map[int]bodyFrame)}
 }
 
 // Run launches the interactive, fullscreen list for the given packages and
@@ -484,6 +495,17 @@ func (m model) helpText() string {
 	return help + "  [q] quit"
 }
 
+// renderBodyFrame returns styleBodyFrame.Render(body) for the item at index,
+// reusing the last render for that index if body hasn't changed since.
+func (m model) renderBodyFrame(index int, body string) string {
+	if cached, ok := m.bodyFrameCache[index]; ok && cached.body == body {
+		return cached.rendered
+	}
+	rendered := styleBodyFrame.Render(body)
+	m.bodyFrameCache[index] = bodyFrame{body: body, rendered: rendered}
+	return rendered
+}
+
 // renderList builds the scrollable document: one line per package, with the
 // expanded ones' changelog bodies inlined beneath them. Returns the content
 // and the line offset of each item's header, used to scroll a given item
@@ -553,20 +575,20 @@ func (m model) renderList() (string, []int) {
 		writeLine(line)
 
 		if it.Expanded {
-			var content string
 			switch {
 			case it.Loading:
+				var content string
 				if it.LoadingStage == "releases" {
 					content = m.spinner.View() + " fetching releases..."
 				} else {
 					content = m.spinner.View() + " checking " + it.LoadingStage + "..."
 				}
+				writeLine(styleBodyFrame.Render(content))
 			case it.Body != "":
-				content = it.Body
+				writeLine(m.renderBodyFrame(i, it.Body))
 			default:
-				content = styleDim.Render("(empty)")
+				writeLine(styleBodyFrame.Render(styleDim.Render("(empty)")))
 			}
-			writeLine(styleBodyFrame.Render(content))
 		}
 	}
 
