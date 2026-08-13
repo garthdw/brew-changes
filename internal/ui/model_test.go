@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 func testItems(n int) []Item {
@@ -19,7 +19,7 @@ func testItems(n int) []Item {
 
 func readyModel(items []Item) model {
 	m := newModel(items)
-	m.viewport = viewport.New(80, 10)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
 	m.ready = true
 	m.refreshViewport()
 	return m
@@ -50,13 +50,13 @@ func TestMoveCursor_EmptyList(t *testing.T) {
 func TestUpdate_ArrowKeysMoveCursor(t *testing.T) {
 	m := readyModel(testItems(3))
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	nm := updated.(model)
 	if nm.cursor != 1 {
 		t.Errorf("got cursor %d, want 1", nm.cursor)
 	}
 
-	updated, _ = nm.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = nm.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	nm = updated.(model)
 	if nm.cursor != 0 {
 		t.Errorf("got cursor %d, want 0", nm.cursor)
@@ -66,13 +66,13 @@ func TestUpdate_ArrowKeysMoveCursor(t *testing.T) {
 func TestUpdate_JKMoveCursorWhenCollapsed(t *testing.T) {
 	m := readyModel(testItems(3))
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "j", Code: 'j'})
 	nm := updated.(model)
 	if nm.cursor != 1 {
 		t.Errorf("'j' on collapsed item: got cursor %d, want 1", nm.cursor)
 	}
 
-	updated, _ = nm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	updated, _ = nm.Update(tea.KeyPressMsg{Text: "k", Code: 'k'})
 	nm = updated.(model)
 	if nm.cursor != 0 {
 		t.Errorf("'k' on collapsed item: got cursor %d, want 0", nm.cursor)
@@ -85,12 +85,12 @@ func TestUpdate_JKScrollWhenExpanded(t *testing.T) {
 	m.items[0].Body = strings.Repeat("line\n", 50)
 	m.refreshViewport()
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "j", Code: 'j'})
 	nm := updated.(model)
 	if nm.cursor != 0 {
 		t.Errorf("'j' on expanded item should scroll, not move cursor: got cursor %d", nm.cursor)
 	}
-	if nm.viewport.YOffset == 0 {
+	if nm.viewport.YOffset() == 0 {
 		t.Error("'j' on expanded item should scroll the viewport down")
 	}
 }
@@ -98,7 +98,7 @@ func TestUpdate_JKScrollWhenExpanded(t *testing.T) {
 func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 	m := readyModel(testItems(1))
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm := updated.(model)
 	if !nm.items[0].Expanded {
 		t.Error("expected item to be expanded after enter")
@@ -111,7 +111,7 @@ func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 	}
 
 	// Collapsing again shouldn't trigger another fetch.
-	updated, cmd = nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = nm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	nm2 := updated.(model)
 	if nm2.items[0].Expanded {
 		t.Error("expected item to be collapsed after second enter")
@@ -139,7 +139,7 @@ func TestResolveChangelogCmd_NoRepoNoManualURL(t *testing.T) {
 
 func TestUpdate_EnterOnEmptyList(t *testing.T) {
 	m := readyModel(nil)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Error("expected no command on empty list")
 	}
@@ -172,7 +172,7 @@ func TestUpdate_BodyFetchedMsg_OutOfRangeIndexIgnored(t *testing.T) {
 
 func TestUpdate_AKeyQuitsWithUpgradeAll(t *testing.T) {
 	m := readyModel(testItems(2))
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "a", Code: 'a'})
 	nm := updated.(model)
 	if nm.action != ActionUpgradeAll {
 		t.Errorf("got action %v, want ActionUpgradeAll", nm.action)
@@ -184,7 +184,7 @@ func TestUpdate_AKeyQuitsWithUpgradeAll(t *testing.T) {
 
 func TestUpdate_UKeyStartsInPlaceUpgradeWithoutQuitting(t *testing.T) {
 	m := readyModel(testItems(2))
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "u", Code: 'u'})
 	nm := updated.(model)
 
 	if nm.action != ActionNone {
@@ -200,7 +200,7 @@ func TestUpdate_UKeyStartsInPlaceUpgradeWithoutQuitting(t *testing.T) {
 
 func TestUpdate_UKeyNoopOnEmptyList(t *testing.T) {
 	m := readyModel(nil)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "u", Code: 'u'})
 	if cmd != nil {
 		t.Error("'u' on an empty list should return no command")
 	}
@@ -221,7 +221,7 @@ func TestUpdate_UKeyNoopWhenAlreadyUpgradedOrUpgrading(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := readyModel([]Item{tt.item})
-			_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+			_, cmd := m.Update(tea.KeyPressMsg{Text: "u", Code: 'u'})
 			if cmd != nil {
 				t.Error("expected no command when the item is already upgraded or upgrading")
 			}
@@ -337,7 +337,7 @@ func TestRenderList_LoadingReleasesShowsSpinner(t *testing.T) {
 
 func TestScrollToCursor_ScrollsDownWhenBelowViewport(t *testing.T) {
 	m := readyModel(testItems(20))
-	m.viewport.Height = 5
+	m.viewport.SetHeight(5)
 	m.viewport.SetContent(strings.Repeat("line\n", 100))
 	m.itemLines = make([]int, 20)
 	for i := range m.itemLines {
@@ -348,14 +348,14 @@ func TestScrollToCursor_ScrollsDownWhenBelowViewport(t *testing.T) {
 	m.scrollToCursor()
 
 	target := m.itemLines[19]
-	if m.viewport.YOffset != target-m.viewport.Height+1 {
-		t.Errorf("got YOffset %d, want %d", m.viewport.YOffset, target-m.viewport.Height+1)
+	if m.viewport.YOffset() != target-m.viewport.Height()+1 {
+		t.Errorf("got YOffset %d, want %d", m.viewport.YOffset(), target-m.viewport.Height()+1)
 	}
 }
 
 func TestScrollToCursor_ScrollsUpWhenAboveViewport(t *testing.T) {
 	m := readyModel(testItems(20))
-	m.viewport.Height = 5
+	m.viewport.SetHeight(5)
 	m.itemLines = make([]int, 20)
 	for i := range m.itemLines {
 		m.itemLines[i] = i * 3
@@ -365,8 +365,8 @@ func TestScrollToCursor_ScrollsUpWhenAboveViewport(t *testing.T) {
 	m.cursor = 0
 	m.scrollToCursor()
 
-	if m.viewport.YOffset != 0 {
-		t.Errorf("got YOffset %d, want 0", m.viewport.YOffset)
+	if m.viewport.YOffset() != 0 {
+		t.Errorf("got YOffset %d, want 0", m.viewport.YOffset())
 	}
 }
 
@@ -379,11 +379,11 @@ func TestWindowSizeMsg_SetsViewportDimensions(t *testing.T) {
 		t.Fatal("expected model to be ready after WindowSizeMsg")
 	}
 	wantHeight := 20 - headerLines - footerLines
-	if nm.viewport.Height != wantHeight {
-		t.Errorf("got viewport height %d, want %d", nm.viewport.Height, wantHeight)
+	if nm.viewport.Height() != wantHeight {
+		t.Errorf("got viewport height %d, want %d", nm.viewport.Height(), wantHeight)
 	}
-	if nm.viewport.Width != 100 {
-		t.Errorf("got viewport width %d, want 100", nm.viewport.Width)
+	if nm.viewport.Width() != 100 {
+		t.Errorf("got viewport width %d, want 100", nm.viewport.Width())
 	}
 }
 
@@ -392,7 +392,7 @@ func TestWindowSizeMsg_ClampsTinyHeightToOne(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 1})
 	nm := updated.(model)
 
-	if nm.viewport.Height != 1 {
-		t.Errorf("got viewport height %d, want 1 (clamped)", nm.viewport.Height)
+	if nm.viewport.Height() != 1 {
+		t.Errorf("got viewport height %d, want 1 (clamped)", nm.viewport.Height())
 	}
 }

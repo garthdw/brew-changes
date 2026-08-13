@@ -5,14 +5,16 @@ package ui
 import (
 	"cmp"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	glamourstyles "charm.land/glamour/v2/styles"
+	"charm.land/lipgloss/v2"
 
 	"github.com/garthdw/homebrew-changes/internal/ghsource"
 	"github.com/garthdw/homebrew-changes/internal/homebrew"
@@ -107,20 +109,31 @@ type model struct {
 	quitting  bool
 	action    Action
 	itemLines []int // line offset of each item's header within the rendered content
+
+	// bodyFrameCache memoizes styleBodyFrame.Render output per item index,
+	// keyed on the body content it was rendered from, so navigating the
+	// list doesn't re-run lipgloss border/padding rendering over large
+	// changelog bodies that haven't changed since the last keypress.
+	bodyFrameCache map[int]bodyFrame
+}
+
+type bodyFrame struct {
+	body     string
+	rendered string
 }
 
 func newModel(items []Item) model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = styleDim
-	return model{items: items, spinner: s}
+	return model{items: items, spinner: s, bodyFrameCache: make(map[int]bodyFrame)}
 }
 
 // Run launches the interactive, fullscreen list for the given packages and
 // blocks until the user quits or confirms an upgrade.
 func Run(items []Item) (Result, error) {
 	m := newModel(items)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	finalModel, err := p.Run()
 	if err != nil {
 		return Result{}, err
@@ -230,7 +243,11 @@ func openURL(url string) tea.Cmd {
 }
 
 func renderMarkdown(raw string) string {
-	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(96))
+	style := glamourstyles.LightStyle
+	if lipgloss.HasDarkBackground(os.Stdin, os.Stdout) {
+		style = glamourstyles.DarkStyle
+	}
+	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle(style), glamour.WithWordWrap(96))
 	if err != nil {
 		return raw
 	}
@@ -254,10 +271,10 @@ func (m *model) scrollToCursor() {
 		return
 	}
 	target := m.itemLines[m.cursor]
-	if target < m.viewport.YOffset {
+	if target < m.viewport.YOffset() {
 		m.viewport.SetYOffset(target)
-	} else if target > m.viewport.YOffset+m.viewport.Height-1 {
-		m.viewport.SetYOffset(target - m.viewport.Height + 1)
+	} else if target > m.viewport.YOffset()+m.viewport.Height()-1 {
+		m.viewport.SetYOffset(target - m.viewport.Height() + 1)
 	}
 }
 
@@ -269,17 +286,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			vpHeight = 1
 		}
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width, vpHeight)
+			m.viewport = viewport.New(viewport.WithWidth(msg.Width), viewport.WithHeight(vpHeight))
 			m.ready = true
 		} else {
-			m.viewport.Width = msg.Width
-			m.viewport.Height = vpHeight
+			m.viewport.SetWidth(msg.Width)
+			m.viewport.SetHeight(vpHeight)
 		}
 		m.refreshViewport()
 		m.scrollToCursor()
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
 			m.quitting = true
@@ -444,12 +461,16 @@ func (m *model) moveCursor(delta int) {
 	m.scrollToCursor()
 }
 
-func (m model) View() string {
+func (m model) View() tea.View {
 	if m.quitting {
-		return ""
+		v := tea.NewView("")
+		v.AltScreen = true
+		return v
 	}
 	if !m.ready {
-		return "Loading..."
+		v := tea.NewView("Loading...")
+		v.AltScreen = true
+		return v
 	}
 
 	var b strings.Builder
@@ -459,7 +480,9 @@ func (m model) View() string {
 	b.WriteString("\n\n")
 	b.WriteString(styleDim.Render(m.helpText()))
 
-	return b.String()
+	v := tea.NewView(b.String())
+	v.AltScreen = true
+	return v
 }
 
 // helpText builds the footer hint line, including [o] only when the
@@ -482,6 +505,17 @@ func (m model) helpText() string {
 		help += "  [u] upgrade current"
 	}
 	return help + "  [q] quit"
+}
+
+// renderBodyFrame returns styleBodyFrame.Render(body) for the item at index,
+// reusing the last render for that index if body hasn't changed since.
+func (m model) renderBodyFrame(index int, body string) string {
+	if cached, ok := m.bodyFrameCache[index]; ok && cached.body == body {
+		return cached.rendered
+	}
+	rendered := styleBodyFrame.Render(body)
+	m.bodyFrameCache[index] = bodyFrame{body: body, rendered: rendered}
+	return rendered
 }
 
 // renderList builds the scrollable document: one line per package, with the
@@ -553,20 +587,20 @@ func (m model) renderList() (string, []int) {
 		writeLine(line)
 
 		if it.Expanded {
-			var content string
 			switch {
 			case it.Loading:
+				var content string
 				if it.LoadingStage == "releases" {
 					content = m.spinner.View() + " fetching releases..."
 				} else {
 					content = m.spinner.View() + " checking " + it.LoadingStage + "..."
 				}
+				writeLine(styleBodyFrame.Render(content))
 			case it.Body != "":
-				content = it.Body
+				writeLine(m.renderBodyFrame(i, it.Body))
 			default:
-				content = styleDim.Render("(empty)")
+				writeLine(styleBodyFrame.Render(styleDim.Render("(empty)")))
 			}
-			writeLine(styleBodyFrame.Render(content))
 		}
 	}
 
