@@ -4,6 +4,7 @@ package homebrew
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -145,20 +146,99 @@ type Info struct {
 	Version  string
 }
 
+// resolveBatchSize caps how many names go into a single `brew info`
+// invocation. `brew info` exits nonzero with no JSON output at all if even
+// one name in the batch fails to resolve (a renamed/removed formula, a
+// cask-only name passed as a formula, etc), so a single bad name would
+// otherwise poison results for the whole list. Chunking bounds that blast
+// radius, and resolveChunk bisects a failing chunk to isolate and drop just
+// the offending name(s).
+const resolveBatchSize = 50
+
 // ResolveInfoBatch returns homepage/source info for multiple formulae or
-// casks (but not both) in a single `brew info` invocation, keyed by name.
-// Names not found in brew's output are simply absent from the result.
+// casks (but not both), keyed by name. Names not found in brew's output
+// (including ones that fail to resolve at all) are simply absent from the
+// result.
 func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
 	infos := make(map[string]Info, len(names))
 	if len(names) == 0 {
 		return infos, nil
 	}
 
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	var firstErr error
+
+	for i := 0; i < len(names); i += resolveBatchSize {
+		end := i + resolveBatchSize
+		if end > len(names) {
+			end = len(names)
+		}
+		chunk := names[i:end]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(chunk []string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			resolved, err := resolveChunk(chunk, isCask)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			for k, v := range resolved {
+				infos[k] = v
+			}
+		}(chunk)
+	}
+	wg.Wait()
+
+	if len(infos) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return infos, nil
+}
+
+// resolveChunk runs a single `brew info` call for chunk. If brew itself
+// can't be run, or its output can't be parsed, that error is returned
+// as-is. If brew runs but exits nonzero (some name in chunk didn't
+// resolve), the chunk is bisected to isolate and drop the offending
+// name(s) instead of losing the whole chunk.
+func resolveChunk(chunk []string, isCask bool) (map[string]Info, error) {
+	infos, err := fetchInfo(chunk, isCask)
+	if err == nil {
+		return infos, nil
+	}
+	if len(chunk) == 1 {
+		return nil, nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return nil, err
+	}
+
+	mid := len(chunk) / 2
+	left, _ := resolveChunk(chunk[:mid], isCask)
+	right, _ := resolveChunk(chunk[mid:], isCask)
+	merged := make(map[string]Info, len(left)+len(right))
+	for k, v := range left {
+		merged[k] = v
+	}
+	for k, v := range right {
+		merged[k] = v
+	}
+	return merged, nil
+}
+
+func fetchInfo(names []string, isCask bool) (map[string]Info, error) {
+	infos := make(map[string]Info, len(names))
+
 	if isCask {
 		args := append([]string{"info", "--json=v2", "--cask"}, names...)
 		out, err := exec.Command("brew", args...).Output()
 		if err != nil {
-			return nil, fmt.Errorf("brew info --cask %v: %w", names, err)
+			return nil, err
 		}
 		var result caskInfoResult
 		if err := json.Unmarshal(out, &result); err != nil {
@@ -173,7 +253,7 @@ func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
 	args := append([]string{"info", "--json=v2", "--formula"}, names...)
 	out, err := exec.Command("brew", args...).Output()
 	if err != nil {
-		return nil, fmt.Errorf("brew info --formula %v: %w", names, err)
+		return nil, err
 	}
 	var result formulaInfoResult
 	if err := json.Unmarshal(out, &result); err != nil {
