@@ -118,8 +118,10 @@ func main() {
 		}
 		fmt.Printf("%-6s %-20s %-30s %-18s %s\n", status, r.name, r.owner+"/"+r.repo, r.source, r.note)
 	}
-	fmt.Printf("\n%d/%d auto-detected ok, %d failed, %d recovered via changelog_config.json, %d skipped\n",
-		ok, ok+fail+manual, fail, manual, skip)
+	matched := ok + manual
+	total := matched + fail
+	fmt.Printf("\n%d/%d matched (%d/%d auto-detected, %d via changelog_config.json), %d failed, %d skipped\n",
+		matched, total, ok, matched, manual, fail, skip)
 }
 
 func topFormulae(n int) ([]string, error) {
