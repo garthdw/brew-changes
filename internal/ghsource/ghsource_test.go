@@ -407,7 +407,7 @@ func TestFetchReleases_StopsAtInstalledAcrossPages(t *testing.T) {
 	apiBaseURL = srv.URL
 	t.Cleanup(func() { apiBaseURL = orig })
 
-	releases, err := FetchReleases("o", "r", "1.0.0")
+	releases, err := FetchReleases("o", "r", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -422,6 +422,61 @@ func TestFetchReleases_StopsAtInstalledAcrossPages(t *testing.T) {
 	}
 }
 
+func TestFetchReleases_TargetVersionBeyondTwentyButWithinFirstPage(t *testing.T) {
+	var page []Release
+	for i := 50; i > 0; i-- {
+		page = append(page, Release{TagName: fmt.Sprintf("v%d.0.0", i)})
+	}
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal(page)
+		w.Write(body)
+	})
+
+	// v25.0.0 is the 26th release, past the old hard cap of 20, but still
+	// well within the single page a target search fetches.
+	releases, err := FetchReleases("o", "r", "", "25.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 26 {
+		t.Fatalf("got %d releases, want 26 (down through the v25.0.0 match)", len(releases))
+	}
+	if last := releases[len(releases)-1]; last.TagName != "v25.0.0" {
+		t.Errorf("last release = %q, want v25.0.0", last.TagName)
+	}
+}
+
+func TestFetchReleases_TargetVersionNotFound_FallsBackToTwentyWithoutASecondPage(t *testing.T) {
+	var page []Release
+	for i := 100; i > 0; i-- {
+		page = append(page, Release{TagName: fmt.Sprintf("v%d.0.0", i)})
+	}
+	requests := 0
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Link", `<https://example.com/should-not-be-fetched>; rel="next"`)
+		body, _ := json.Marshal(page)
+		w.Write(body)
+	})
+
+	// "999.0.0" never appears anywhere in the page, so this exercises the
+	// best-effort fallback: truncate to the usual 20 rather than treat a
+	// missing tag as an error, and don't page further looking for it.
+	releases, err := FetchReleases("o", "r", "", "999.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("got %d requests, want 1 (target search must not fetch a second page)", requests)
+	}
+	if len(releases) != 20 {
+		t.Fatalf("got %d releases, want 20 (best-effort fallback)", len(releases))
+	}
+	if releases[0].TagName != "v100.0.0" {
+		t.Errorf("first release = %q, want v100.0.0", releases[0].TagName)
+	}
+}
+
 func TestFetchReleases_TagPrefixOtherThanV(t *testing.T) {
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := json.Marshal([]Release{
@@ -432,7 +487,7 @@ func TestFetchReleases_TagPrefixOtherThanV(t *testing.T) {
 		w.Write(body)
 	})
 
-	releases, err := FetchReleases("o", "r", "1.8.1")
+	releases, err := FetchReleases("o", "r", "1.8.1", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -457,7 +512,7 @@ func TestFetchReleases_FallsBackToTagsWhenNoReleases(t *testing.T) {
 		}
 	})
 
-	releases, err := FetchReleases("o", "r", "1.0.0")
+	releases, err := FetchReleases("o", "r", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -480,7 +535,7 @@ func TestFetchReleases_NoFallbackWhenReleasesExistButNoneAreNewer(t *testing.T) 
 		}
 	})
 
-	releases, err := FetchReleases("o", "r", "1.0.0")
+	releases, err := FetchReleases("o", "r", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -515,7 +570,7 @@ func TestFetchReleases_ErrorStatus(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	_, err := FetchReleases("o", "r", "1.0.0")
+	_, err := FetchReleases("o", "r", "1.0.0", "")
 	if err == nil {
 		t.Error("expected error on non-200 status")
 	}

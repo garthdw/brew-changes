@@ -37,6 +37,7 @@ type result struct {
 	found       bool
 	skipped     bool
 	manual      bool // recovered via changelog_config.json rather than auto-detection
+	partial     bool // releases fetched, but the target version's tag wasn't among them (best effort)
 	note        string
 }
 
@@ -100,7 +101,7 @@ func main() {
 
 	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
 
-	var ok, fail, skip, manual int
+	var ok, fail, skip, manual, partial int
 	for _, r := range results {
 		status := "OK"
 		switch {
@@ -110,6 +111,9 @@ func main() {
 		case r.manual:
 			status = "MANUAL"
 			manual++
+		case r.partial:
+			status = "PARTIAL"
+			partial++
 		case !r.found:
 			status = "FAIL"
 			fail++
@@ -119,9 +123,9 @@ func main() {
 		fmt.Printf("%-6s %-20s %-30s %-18s %s\n", status, r.name, r.owner+"/"+r.repo, r.source, r.note)
 	}
 	matched := ok + manual
-	total := matched + fail
-	fmt.Printf("\n%d/%d matched (%d/%d auto-detected, %d via changelog_config.json), %d failed, %d skipped\n",
-		matched, total, ok, matched, manual, fail, skip)
+	total := matched + fail + partial
+	fmt.Printf("\n%d/%d matched (%d/%d auto-detected, %d via changelog_config.json), %d partial (best-effort), %d failed, %d skipped\n",
+		matched, total, ok, matched, manual, partial, fail, skip)
 }
 
 func topFormulae(n int) ([]string, error) {
@@ -192,7 +196,7 @@ func validate(name string, info homebrew.Info) result {
 	filename, useReleases := ghsource.ResolveChangelogSource(owner, repo)
 	if useReleases {
 		r.source = "releases"
-		releases, err := ghsource.FetchReleases(owner, repo, "")
+		releases, err := ghsource.FetchReleases(owner, repo, "", info.Version)
 		if err != nil {
 			r.note = "fetch error: " + err.Error()
 			return r
@@ -201,14 +205,13 @@ func validate(name string, info homebrew.Info) result {
 			r.note = "no releases found"
 			return r
 		}
-		for _, rel := range releases {
-			if ghsource.TagMatchesVersion(rel.TagName, info.Version) {
-				r.found = true
-				r.note = fmt.Sprintf("matched tag=%s", rel.TagName)
-				return r
-			}
+		if last := releases[len(releases)-1]; ghsource.TagMatchesVersion(last.TagName, info.Version) {
+			r.found = true
+			r.note = fmt.Sprintf("matched tag=%s", last.TagName)
+			return r
 		}
-		r.note = fmt.Sprintf("no tag matched %s; latest=%s (%d releases checked)", info.Version, releases[0].TagName, len(releases))
+		r.partial = true
+		r.note = fmt.Sprintf("tag for %s not found; showing %d most recent releases (latest=%s)", info.Version, len(releases), releases[0].TagName)
 		return r
 	}
 

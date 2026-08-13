@@ -208,7 +208,7 @@ func fetchChangelogFileCmd(index int, it Item, filename string) tea.Cmd {
 // when no changelog file was found.
 func fetchReleasesCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
-		releases, err := ghsource.FetchReleases(it.Owner, it.Repo, it.Installed)
+		releases, err := ghsource.FetchReleases(it.Owner, it.Repo, it.Installed, it.Current)
 		if err != nil || len(releases) == 0 {
 			return bodyFetchedMsg{index: index, body: "No changelog file or GitHub releases found for this package."}
 		}

@@ -497,9 +497,11 @@ func normalizeVersionComponent(s string) string {
 }
 
 // FetchReleases returns releases newer than installedVersion, newest first,
-// capped at a reasonable count. It stops as soon as it reaches the release
-// matching installedVersion (see TagMatchesVersion), since everything after
-// that in the newest-first list is already installed.
+// stopping at the release matching installedVersion and otherwise capping
+// out at 20. If targetVersion is non-empty, the single page of up to 100
+// releases is searched for a match instead of capping at 20: if found, it's
+// included as the last entry returned; if not, the result is truncated back
+// down to 20 as a best-effort fallback rather than treated as an error.
 //
 // Some repos (docker/cli, vim/vim, ...) never publish GitHub Releases at
 // all — they just tag commits directly. When the Releases API comes back
@@ -508,23 +510,47 @@ func normalizeVersionComponent(s string) string {
 // newest-first the same way and which TagMatchesVersion can filter
 // identically. The fallback only has tag names to work with, so the
 // resulting Releases have empty PublishedAt/Body.
-func FetchReleases(owner, repo, installedVersion string) ([]Release, error) {
-	filtered, sawAny, err := fetchReleasePages(owner, repo, installedVersion)
+func FetchReleases(owner, repo, installedVersion, targetVersion string) ([]Release, error) {
+	filtered, sawAny, err := fetchReleasePages(owner, repo, installedVersion, targetVersion)
 	if err != nil {
 		return nil, err
 	}
 	if !sawAny {
-		return fetchTags(owner, repo, installedVersion)
+		return fetchTags(owner, repo, installedVersion, targetVersion)
 	}
 	return filtered, nil
 }
 
-func fetchReleasePages(owner, repo, installedVersion string) ([]Release, bool, error) {
+// accumulateRelease appends r to filtered and reports whether the caller
+// should stop paging: once installedVersion is matched (r itself is
+// excluded, since everything from here on is already installed), once
+// targetVersion is matched (r is the last entry included), or, when
+// targetVersion is empty, once the 20-item cap is reached.
+func accumulateRelease(filtered []Release, r Release, installedVersion, targetVersion string) ([]Release, bool) {
+	if TagMatchesVersion(r.TagName, installedVersion) {
+		return filtered, true
+	}
+	filtered = append(filtered, r)
+	if TagMatchesVersion(r.TagName, targetVersion) {
+		return filtered, true
+	}
+	if targetVersion == "" && len(filtered) >= 20 {
+		return filtered, true
+	}
+	return filtered, false
+}
+
+func fetchReleasePages(owner, repo, installedVersion, targetVersion string) ([]Release, bool, error) {
 	var filtered []Release
 	sawAny := false
 	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", apiBaseURL, owner, repo)
 
-	for page := 0; page < maxReleasePages && url != "" && len(filtered) < 20; page++ {
+	pages := maxReleasePages
+	if targetVersion != "" {
+		pages = 1
+	}
+
+	for page := 0; page < pages && url != ""; page++ {
 		resp, err := get(url)
 		if err != nil {
 			return nil, false, fmt.Errorf("fetching releases for %s/%s: %w", owner, repo, err)
@@ -546,11 +572,9 @@ func fetchReleasePages(owner, repo, installedVersion string) ([]Release, bool, e
 			sawAny = true
 		}
 		for _, r := range pageReleases {
-			if TagMatchesVersion(r.TagName, installedVersion) {
-				return filtered, sawAny, nil
-			}
-			filtered = append(filtered, r)
-			if len(filtered) >= 20 {
+			var stop bool
+			filtered, stop = accumulateRelease(filtered, r, installedVersion, targetVersion)
+			if stop {
 				return filtered, sawAny, nil
 			}
 		}
@@ -558,6 +582,9 @@ func fetchReleasePages(owner, repo, installedVersion string) ([]Release, bool, e
 		url = nextPageURL(resp.Header.Get("Link"))
 	}
 
+	if targetVersion != "" && len(filtered) > 20 {
+		filtered = filtered[:20]
+	}
 	return filtered, sawAny, nil
 }
 
@@ -567,11 +594,16 @@ type tagEntry struct {
 
 // fetchTags mirrors fetchReleasePages against the tags API instead of
 // releases, for repos that don't use GitHub Releases at all.
-func fetchTags(owner, repo, installedVersion string) ([]Release, error) {
+func fetchTags(owner, repo, installedVersion, targetVersion string) ([]Release, error) {
 	var filtered []Release
 	url := fmt.Sprintf("%s/repos/%s/%s/tags?per_page=100", apiBaseURL, owner, repo)
 
-	for page := 0; page < maxReleasePages && url != "" && len(filtered) < 20; page++ {
+	pages := maxReleasePages
+	if targetVersion != "" {
+		pages = 1
+	}
+
+	for page := 0; page < pages && url != ""; page++ {
 		resp, err := get(url)
 		if err != nil {
 			return nil, fmt.Errorf("fetching tags for %s/%s: %w", owner, repo, err)
@@ -590,11 +622,9 @@ func fetchTags(owner, repo, installedVersion string) ([]Release, error) {
 			return nil, fmt.Errorf("parsing tags for %s/%s: %w", owner, repo, err)
 		}
 		for _, t := range tags {
-			if TagMatchesVersion(t.Name, installedVersion) {
-				return filtered, nil
-			}
-			filtered = append(filtered, Release{TagName: t.Name})
-			if len(filtered) >= 20 {
+			var stop bool
+			filtered, stop = accumulateRelease(filtered, Release{TagName: t.Name}, installedVersion, targetVersion)
+			if stop {
 				return filtered, nil
 			}
 		}
@@ -602,6 +632,9 @@ func fetchTags(owner, repo, installedVersion string) ([]Release, error) {
 		url = nextPageURL(resp.Header.Get("Link"))
 	}
 
+	if targetVersion != "" && len(filtered) > 20 {
+		filtered = filtered[:20]
+	}
 	return filtered, nil
 }
 
