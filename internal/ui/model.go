@@ -204,6 +204,10 @@ func fetchChangelogFileCmd(index int, it Item, filename string) tea.Cmd {
 	}
 }
 
+// FetchReleases can return more than this when it.Current's tag sits deep in
+// the page (see its doc comment), so the TUI caps what it renders here.
+const maxDisplayedReleases = 10
+
 // fetchReleasesCmd checks GitHub releases, the second fetch stage, used only
 // when no changelog file was found.
 func fetchReleasesCmd(index int, it Item) tea.Cmd {
@@ -211,6 +215,9 @@ func fetchReleasesCmd(index int, it Item) tea.Cmd {
 		releases, err := ghsource.FetchReleases(it.Owner, it.Repo, it.Installed, it.Current)
 		if err != nil || len(releases) == 0 {
 			return bodyFetchedMsg{index: index, body: "No changelog file or GitHub releases found for this package."}
+		}
+		if len(releases) > maxDisplayedReleases {
+			releases = releases[:maxDisplayedReleases]
 		}
 		var b strings.Builder
 		for _, r := range releases {
