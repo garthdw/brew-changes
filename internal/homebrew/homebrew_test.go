@@ -50,6 +50,8 @@ func TestFormulaInfo_Unmarshal_PrefersStableURL(t *testing.T) {
 	raw := `{
 		"formulae": [
 			{
+				"name": "opencode",
+				"full_name": "anomalyco/tap/opencode",
 				"homepage": "https://example.com",
 				"urls": {
 					"stable": {"url": "https://example.com/stable.tar.gz"},
@@ -67,6 +69,9 @@ func TestFormulaInfo_Unmarshal_PrefersStableURL(t *testing.T) {
 		t.Fatalf("got %d formulae, want 1", len(result.Formulae))
 	}
 	f := result.Formulae[0]
+	if f.FullName != "anomalyco/tap/opencode" {
+		t.Errorf("got FullName %q, want tap-qualified full_name", f.FullName)
+	}
 	url := f.URLs.Stable.URL
 	if url == "" {
 		url = f.URLs.Head.URL
@@ -79,7 +84,7 @@ func TestFormulaInfo_Unmarshal_PrefersStableURL(t *testing.T) {
 func TestCaskInfo_Unmarshal(t *testing.T) {
 	raw := `{
 		"casks": [
-			{"homepage": "https://example.com", "url": "https://example.com/app.dmg"}
+			{"token": "app", "full_token": "someuser/tap/app", "homepage": "https://example.com", "url": "https://example.com/app.dmg"}
 		]
 	}`
 
@@ -91,6 +96,9 @@ func TestCaskInfo_Unmarshal(t *testing.T) {
 		t.Fatalf("got %d casks, want 1", len(result.Casks))
 	}
 	c := result.Casks[0]
+	if c.FullToken != "someuser/tap/app" {
+		t.Errorf("got FullToken %q, want tap-qualified full_token", c.FullToken)
+	}
 	if c.Homepage != "https://example.com" || c.URL != "https://example.com/app.dmg" {
 		t.Errorf("got %+v", c)
 	}

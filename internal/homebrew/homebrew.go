@@ -109,6 +109,7 @@ func firstOrEmpty(versions []string) string {
 
 type formulaInfo struct {
 	Name     string `json:"name"`
+	FullName string `json:"full_name"`
 	Homepage string `json:"homepage"`
 	Versions struct {
 		Stable string `json:"stable"`
@@ -124,10 +125,11 @@ type formulaInfo struct {
 }
 
 type caskInfo struct {
-	Token    string `json:"token"`
-	Homepage string `json:"homepage"`
-	Version  string `json:"version"`
-	URL      string `json:"url"`
+	Token     string `json:"token"`
+	FullToken string `json:"full_token"`
+	Homepage  string `json:"homepage"`
+	Version   string `json:"version"`
+	URL       string `json:"url"`
 }
 
 type formulaInfoResult struct {
@@ -245,7 +247,7 @@ func fetchInfo(names []string, isCask bool) (map[string]Info, error) {
 			return nil, fmt.Errorf("parsing brew info --cask %v output: %w", names, err)
 		}
 		for _, c := range result.Casks {
-			infos[c.Token] = Info{Homepage: c.Homepage, URL: c.URL, Version: c.Version}
+			infos[c.FullToken] = Info{Homepage: c.Homepage, URL: c.URL, Version: c.Version}
 		}
 		return infos, nil
 	}
@@ -264,7 +266,7 @@ func fetchInfo(names []string, isCask bool) (map[string]Info, error) {
 		if url == "" {
 			url = f.URLs.Head.URL
 		}
-		infos[f.Name] = Info{Homepage: f.Homepage, URL: url, Version: f.Versions.Stable}
+		infos[f.FullName] = Info{Homepage: f.Homepage, URL: url, Version: f.Versions.Stable}
 	}
 	return infos, nil
 }

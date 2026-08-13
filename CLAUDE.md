@@ -41,3 +41,7 @@ Arrow keys (`up`/`down`) always move the cursor between items. `j`/`k` are dual-
 Publishing a GitHub Release (tag `vX.Y.Z`) triggers `.github/workflows/release.yml`, which runs GoReleaser to cross-compile macOS binaries (arm64 + amd64, no CGO), attach them to the release, and auto-commit the regenerated `Formula/brew-changes.rb` to `main` via GoReleaser's `brews` publisher (configured in `.goreleaser.yaml`). **`Formula/brew-changes.rb` is generated — don't hand-edit it**, edit `.goreleaser.yaml`'s `brews:` block instead. Note: GoReleaser has soft-deprecated `brews` in favor of `homebrew_casks`, but the installed GoReleaser version doesn't yet implement a formula-generating replacement, so `brews` (with its deprecation warning) is intentional here, not an oversight.
 
 There is no `vendor/` directory — it was intentionally removed once the formula switched from building from source to downloading prebuilt binaries, since Homebrew no longer needs to `go build` in a network-restricted sandbox.
+
+## Code comments
+
+Comments should only exist to help when the code is confusing, or to explain purpose/rationale that isn't obvious from reading it. Don't add a comment if it's easily understood from the code itself, and don't leave comments describing how the code used to work. The exception is a comment explaining *why* code is written in an unusual way to handle a specific edge case or issue (e.g. "loop here to avoid a lookup issue") — that kind of non-obvious rationale is worth keeping.

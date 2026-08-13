@@ -93,6 +93,146 @@ func TestResolveRepo(t *testing.T) {
 	}
 }
 
+func TestParseGitHubFileURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		url       string
+		wantOwner string
+		wantRepo  string
+		wantRef   string
+		wantPath  string
+		wantOK    bool
+	}{
+		{
+			name:      "github.com blob URL",
+			url:       "https://github.com/dart-lang/sdk/blob/main/CHANGELOG.md",
+			wantOwner: "dart-lang",
+			wantRepo:  "sdk",
+			wantRef:   "main",
+			wantPath:  "CHANGELOG.md",
+			wantOK:    true,
+		},
+		{
+			name:      "github.com raw URL",
+			url:       "https://github.com/owner/repo/raw/main/nested/dir/NEWS",
+			wantOwner: "owner",
+			wantRepo:  "repo",
+			wantRef:   "main",
+			wantPath:  "nested/dir/NEWS",
+			wantOK:    true,
+		},
+		{
+			name:      "raw.githubusercontent.com URL",
+			url:       "https://raw.githubusercontent.com/owner/repo/main/CHANGELOG.md",
+			wantOwner: "owner",
+			wantRepo:  "repo",
+			wantRef:   "main",
+			wantPath:  "CHANGELOG.md",
+			wantOK:    true,
+		},
+		{
+			name:   "not a github URL",
+			url:    "https://curl.se/changes.html",
+			wantOK: false,
+		},
+		{
+			name:   "github.com but not a file URL",
+			url:    "https://github.com/owner/repo/releases",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo, ref, path, ok := parseGitHubFileURL(tt.url)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if owner != tt.wantOwner || repo != tt.wantRepo || ref != tt.wantRef || path != tt.wantPath {
+				t.Errorf("got (%q, %q, %q, %q), want (%q, %q, %q, %q)", owner, repo, ref, path, tt.wantOwner, tt.wantRepo, tt.wantRef, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestFetchRaw(t *testing.T) {
+	t.Run("plain text is returned", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			fmt.Fprint(w, "## 1.2.3\n\nsome notes\n")
+		}))
+		defer srv.Close()
+
+		content, ok := FetchRaw(srv.URL)
+		if !ok {
+			t.Fatalf("ok = false, want true")
+		}
+		if content != "## 1.2.3\n\nsome notes\n" {
+			t.Errorf("got %q", content)
+		}
+	})
+
+	t.Run("html response is rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, "<html><body>not a changelog</body></html>")
+		}))
+		defer srv.Close()
+
+		if _, ok := FetchRaw(srv.URL); ok {
+			t.Errorf("ok = true, want false for html content-type")
+		}
+	})
+
+	t.Run("non-200 status is rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		if _, ok := FetchRaw(srv.URL); ok {
+			t.Errorf("ok = true, want false for 404")
+		}
+	})
+}
+
+func TestFetchManualSection_NonGitHub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "## 2.0.0\nnew stuff\n## 1.0.0\nold stuff\n")
+	}))
+	defer srv.Close()
+
+	section, ok := FetchManualSection(srv.URL, "2.0.0", "1.0.0", false)
+	if !ok {
+		t.Fatalf("ok = false, want true")
+	}
+	if section != "## 2.0.0\nnew stuff" {
+		t.Errorf("got %q", section)
+	}
+}
+
+func TestFetchManualSection_GitHubBlobURL(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		content := base64.StdEncoding.EncodeToString([]byte("## 2.0.0\nnew stuff\n## 1.0.0\nold stuff\n"))
+		json.NewEncoder(w).Encode(contentsResponse{Content: content})
+	})
+
+	// FetchManualSection parses owner/repo/path from the URL itself and
+	// hits apiBaseURL (overridden to srv.URL) rather than the URL's host,
+	// so any github.com blob URL resolves through the test server.
+	section, ok := FetchManualSection("https://github.com/owner/repo/blob/main/CHANGELOG.md", "2.0.0", "1.0.0", false)
+	if !ok {
+		t.Fatalf("ok = false, want true")
+	}
+	if section != "## 2.0.0\nnew stuff" {
+		t.Errorf("got %q", section)
+	}
+}
+
 func rootListingHandler(names ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		entries := make([]repoContentEntry, len(names))

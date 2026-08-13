@@ -169,8 +169,12 @@ func resolveChangelogCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
 		if it.Owner == "" {
 			if it.ManualChangelogURL != "" {
+				if section, ok := ghsource.FetchManualSection(it.ManualChangelogURL, it.Current, it.Installed, it.LaxHeadings); ok {
+					body := fmt.Sprintf("(from %s)", it.ManualChangelogURL) + "\n\n" + renderMarkdown(section)
+					return bodyFetchedMsg{index: index, body: body}
+				}
 				body := "No GitHub repository could be resolved automatically for this package.\n\n" +
-					renderMarkdown(fmt.Sprintf("Known changelog: [%s](%s)", it.ManualChangelogURL, it.ManualChangelogURL))
+					renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualChangelogURL))
 				return bodyFetchedMsg{index: index, body: body}
 			}
 			return bodyFetchedMsg{index: index, body: "No GitHub repository could be resolved for this package; changelog unavailable."}
@@ -560,6 +564,8 @@ func (m model) renderList() (string, []int) {
 		sourceHint := hintStyle.Render("[no changelog source]")
 		if it.Owner != "" {
 			sourceHint = hintStyle.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
+		} else if it.ManualChangelogURL != "" {
+			sourceHint = hintStyle.Render("[known changelog]")
 		}
 
 		var statusTag string

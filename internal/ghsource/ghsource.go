@@ -126,16 +126,107 @@ type contentsResponse struct {
 // FetchChangelogFileAt fetches a single named file's content from the
 // repo's default branch.
 func FetchChangelogFileAt(owner, repo, filename string) (content string, ok bool) {
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", apiBaseURL, owner, repo, filename)
+	return fetchGitHubFile(owner, repo, filename, "")
+}
+
+// fetchGitHubFile fetches a file via the Contents API, falling back to a
+// raw.githubusercontent.com request if that fails — the Contents API
+// returns no content for files over 1MB (e.g. aws-cli's CHANGELOG.rst). An
+// empty ref uses the default branch ("HEAD" for the raw fallback).
+func fetchGitHubFile(owner, repo, path, ref string) (content string, ok bool) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s", apiBaseURL, owner, repo, path)
+	if ref != "" {
+		apiURL += "?ref=" + ref
+	}
 	var parsed contentsResponse
-	if err := getJSON(url, &parsed); err != nil {
+	if err := getJSON(apiURL, &parsed); err == nil {
+		if decoded, derr := base64.StdEncoding.DecodeString(strings.ReplaceAll(parsed.Content, "\n", "")); derr == nil && len(decoded) > 0 {
+			return string(decoded), true
+		}
+	}
+
+	rawRef := ref
+	if rawRef == "" {
+		rawRef = "HEAD"
+	}
+	rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, rawRef, path)
+	return FetchRaw(rawURL)
+}
+
+var (
+	githubFileURLPattern      = regexp.MustCompile(`^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/(?:blob|raw)/([^/]+)/(.+)$`)
+	rawGithubUsercontentURLRe = regexp.MustCompile(`^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$`)
+)
+
+// parseGitHubFileURL extracts owner/repo/ref/path from a github.com
+// blob/raw URL or a raw.githubusercontent.com URL (two patterns since the
+// hosts don't share a path shape), so the file can be fetched through the
+// authenticated Contents API instead of an anonymous GET.
+func parseGitHubFileURL(rawURL string) (owner, repo, ref, path string, ok bool) {
+	if m := githubFileURLPattern.FindStringSubmatch(rawURL); m != nil {
+		return m[1], m[2], m[3], m[4], true
+	}
+	if m := rawGithubUsercontentURLRe.FindStringSubmatch(rawURL); m != nil {
+		return m[1], m[2], m[3], m[4], true
+	}
+	return "", "", "", "", false
+}
+
+// rawFetchAttempts bounds retries for FetchRaw's transient-failure retry:
+// raw.githubusercontent.com in particular has been observed to 503
+// intermittently even when the file is perfectly reachable.
+const rawFetchAttempts = 3
+
+// FetchRaw fetches an arbitrary URL as plain text. ok is false if the
+// response looks like HTML (unusable by changelog.TrimToRange) or every
+// attempt fails. Only transient failures (network errors, 5xx) are
+// retried — a 404 or HTML response won't change on retry.
+func FetchRaw(rawURL string) (content string, ok bool) {
+	for attempt := 0; attempt < rawFetchAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(300 * time.Millisecond)
+		}
+		var retryable bool
+		content, ok, retryable = fetchRawOnce(rawURL)
+		if ok || !retryable {
+			return content, ok
+		}
+	}
+	return "", false
+}
+
+func fetchRawOnce(rawURL string) (content string, ok bool, retryable bool) {
+	resp, err := http.Get(rawURL)
+	if err != nil {
+		return "", false, true
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false, resp.StatusCode >= 500
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "html") {
+		return "", false, false
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", false, true
+	}
+	return string(body), true, false
+}
+
+// FetchManualSection fetches a manually-configured changelog URL (see
+// changelogconfig) and trims it to the section documenting newVersion.
+func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (section string, ok bool) {
+	var content string
+	if owner, repo, ref, path, isGitHub := parseGitHubFileURL(rawURL); isGitHub {
+		content, ok = fetchGitHubFile(owner, repo, path, ref)
+	} else {
+		content, ok = FetchRaw(rawURL)
+	}
+	if !ok {
 		return "", false
 	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(parsed.Content, "\n", ""))
-	if err != nil || len(decoded) == 0 {
-		return "", false
-	}
-	return string(decoded), true
+	return changelog.TrimToRange(content, newVersion, installedVersion, lax)
 }
 
 // FetchChangelogSection fetches filename's content and trims it to the
