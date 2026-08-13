@@ -18,7 +18,22 @@ import (
 	"github.com/garthdw/homebrew-changes/internal/changelog"
 )
 
-var changelogFilenames = []string{"CHANGELOG.md", "CHANGES.md", "HISTORY.md", "NEWS.md", "CHANGELOG"}
+var (
+	changelogBaseNames  = []string{"CHANGELOG", "CHANGES", "HISTORY", "NEWS"}
+	changelogExtensions = []string{".md", ".rst", ""}
+	changelogFilenames  = buildChangelogFilenames()
+)
+
+// buildChangelogFilenames expands changelogBaseNames x changelogExtensions.
+func buildChangelogFilenames() []string {
+	filenames := make([]string, 0, len(changelogBaseNames)*len(changelogExtensions))
+	for _, name := range changelogBaseNames {
+		for _, ext := range changelogExtensions {
+			filenames = append(filenames, name+ext)
+		}
+	}
+	return filenames
+}
 
 // apiBaseURL is the GitHub REST API base, overridable in tests.
 var apiBaseURL = "https://api.github.com"

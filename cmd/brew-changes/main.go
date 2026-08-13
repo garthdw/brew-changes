@@ -58,11 +58,11 @@ func run() error {
 		}
 
 		info := infos[pkg.Name]
-		owner, repo, _ := ghsource.ResolveRepo(info.Homepage, info.URL)
+		manualChangelogURL, hasManualOverride := knownchangelogs.Lookup(pkg.Name)
 
-		var manualChangelogURL string
-		if owner == "" {
-			manualChangelogURL, _ = knownchangelogs.Lookup(pkg.Name)
+		var owner, repo string
+		if !hasManualOverride {
+			owner, repo, _ = ghsource.ResolveRepo(info.Homepage, info.URL)
 		}
 
 		items = append(items, ui.Item{
