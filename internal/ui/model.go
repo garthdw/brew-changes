@@ -16,6 +16,7 @@ import (
 	glamourstyles "charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 
+	"github.com/garthdw/bubblekit/statusline"
 	"github.com/garthdw/homebrew-changes/internal/ghsource"
 	"github.com/garthdw/homebrew-changes/internal/homebrew"
 )
@@ -118,6 +119,7 @@ type model struct {
 	ready     bool
 	quitting  bool
 	action    Action
+	width     int
 	itemLines []int // line offset of each item's header within the rendered content
 
 	// bodyFrameCache memoizes styleBodyFrame.Render output per item index,
@@ -302,6 +304,7 @@ func (m *model) scrollToCursor() {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		vpHeight := msg.Height - headerLines - footerLines
 		if vpHeight < 1 {
 			vpHeight = 1
@@ -503,37 +506,48 @@ func (m model) View() tea.View {
 	b.WriteString("\n\n")
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n\n")
-	b.WriteString(styleDim.Render(m.helpText()))
+	b.WriteString(strings.Join(m.helpText(), "\n"))
 
 	v := tea.NewView(b.String())
 	v.AltScreen = true
 	return v
 }
 
-// helpText builds the footer hint line, including [o] only when the
+// helpText builds the footer hint line(s), including [o] only when the
 // highlighted item has a homepage distinct from its GitHub repo, [g] only
 // when it has a resolved GitHub repo, and [c] whenever ChangelogURL has
-// something to open (a manual override, or a resolved GitHub repo).
-func (m model) helpText() string {
-	help := "[enter] expand/collapse"
+// something to open (a manual override, or a resolved GitHub repo). Hints
+// are dropped lowest-priority-first if they don't fit m.width.
+func (m model) helpText() []string {
+	hint := func(text string, priority int) statusline.Node {
+		return statusline.Node{
+			Provider: func() string { return styleDim.Render(text) },
+			Align:    statusline.Left,
+			Priority: priority,
+		}
+	}
+
+	nodes := []statusline.Node{hint("[enter] expand/collapse", 100)}
 	if len(m.items) > 0 {
 		it := m.items[m.cursor]
 		var githubUrl = it.GitHubURL()
 		if it.Homepage != "" && it.Homepage != githubUrl {
-			help += "  [o] open homepage"
+			nodes = append(nodes, hint("[o] open homepage", 10))
 		}
 		if githubUrl != "" {
-			help += "  [g] open github"
+			nodes = append(nodes, hint("[g] open github", 20))
 		}
 		if it.ChangelogURL() != "" {
-			help += "  [c] open changelog"
+			nodes = append(nodes, hint("[c] open changelog", 30))
 		}
 	}
-	help += "  [a] upgrade all"
+	nodes = append(nodes, hint("[a] upgrade all", 40))
 	if len(m.items) > 0 && !m.items[m.cursor].Upgraded {
-		help += "  [u] upgrade current"
+		nodes = append(nodes, hint("[u] upgrade current", 50))
 	}
-	return help + "  [q] quit"
+	nodes = append(nodes, hint("[q] quit", 90))
+
+	return statusline.Render(nodes, m.width, "  ", 1)
 }
 
 // renderBodyFrame returns styleBodyFrame.Render(body) for the item at index,
