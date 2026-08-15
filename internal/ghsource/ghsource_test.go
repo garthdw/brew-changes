@@ -454,6 +454,11 @@ func TestFetchReleases_TargetVersionNotFound_FallsBackToTwentyWithoutASecondPage
 	requests := 0
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		if r.URL.Path == "/repos/o/r/releases/latest" {
+			body, _ := json.Marshal(Release{TagName: "v100.0.0"})
+			w.Write(body)
+			return
+		}
 		w.Header().Set("Link", `<https://example.com/should-not-be-fetched>; rel="next"`)
 		body, _ := json.Marshal(page)
 		w.Write(body)
@@ -461,19 +466,48 @@ func TestFetchReleases_TargetVersionNotFound_FallsBackToTwentyWithoutASecondPage
 
 	// "999.0.0" never appears anywhere in the page, so this exercises the
 	// best-effort fallback: truncate to the usual 20 rather than treat a
-	// missing tag as an error, and don't page further looking for it.
+	// missing tag as an error, and don't page further looking for it. It
+	// also checks /releases/latest as a last resort (v100.0.0, which still
+	// doesn't match), so that's the only extra request expected.
 	releases, err := FetchReleases("o", "r", "", "999.0.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if requests != 1 {
-		t.Fatalf("got %d requests, want 1 (target search must not fetch a second page)", requests)
+	if requests != 2 {
+		t.Fatalf("got %d requests, want 2 (target search must not fetch a second list page, only the /releases/latest fallback)", requests)
 	}
 	if len(releases) != 20 {
 		t.Fatalf("got %d releases, want 20 (best-effort fallback)", len(releases))
 	}
 	if releases[0].TagName != "v100.0.0" {
 		t.Errorf("first release = %q, want v100.0.0", releases[0].TagName)
+	}
+}
+
+func TestFetchReleases_TargetVersionMissingFromListButLatest_IsAppended(t *testing.T) {
+	page := []Release{
+		{TagName: "v4.6.6"},
+		{TagName: "v4.6.5"},
+	}
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/o/r/releases/latest" {
+			body, _ := json.Marshal(Release{TagName: "v4.6.7", Body: "notes"})
+			w.Write(body)
+			return
+		}
+		body, _ := json.Marshal(page)
+		w.Write(body)
+	})
+
+	// Reproduces a GitHub API quirk where a just-published release is
+	// absent from the paginated /releases list (its search index lags)
+	// even though /releases/latest already reflects it.
+	releases, err := FetchReleases("o", "r", "4.6.6", "4.6.7")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 1 || releases[0].TagName != "v4.6.7" {
+		t.Fatalf("got %+v, want single release v4.6.7 from the /releases/latest fallback", releases)
 	}
 }
 

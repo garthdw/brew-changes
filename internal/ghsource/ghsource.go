@@ -518,7 +518,27 @@ func FetchReleases(owner, repo, installedVersion, targetVersion string) ([]Relea
 	if !sawAny {
 		return fetchTags(owner, repo, installedVersion, targetVersion)
 	}
-	return filtered, nil
+	return appendLatestIfMissing(owner, repo, filtered, targetVersion), nil
+}
+
+// appendLatestIfMissing works around a GitHub API quirk where a release
+// published very recently can be absent from the paginated /releases list
+// (its search index lags behind) even though /releases/latest already
+// reflects it. If targetVersion wasn't found in filtered, this checks
+// /releases/latest and appends it on a match.
+func appendLatestIfMissing(owner, repo string, filtered []Release, targetVersion string) []Release {
+	if targetVersion == "" {
+		return filtered
+	}
+	if len(filtered) > 0 && TagMatchesVersion(filtered[len(filtered)-1].TagName, targetVersion) {
+		return filtered
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBaseURL, owner, repo)
+	var latest Release
+	if err := getJSON(url, &latest); err != nil || !TagMatchesVersion(latest.TagName, targetVersion) {
+		return filtered
+	}
+	return append(filtered, latest)
 }
 
 // accumulateRelease appends r to filtered and reports whether the caller
