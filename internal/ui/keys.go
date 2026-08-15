@@ -19,6 +19,7 @@ var mainMap = keymap.New("main", nil, map[string]string{
 	"enter":  "toggle-expand",
 	"o":      "open-homepage",
 	"g":      "open-github",
+	"c":      "open-changelog",
 	"a":      "upgrade-all",
 	"u":      "upgrade-current",
 })

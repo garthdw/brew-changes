@@ -35,6 +35,12 @@ type Item struct {
 	// be resolved automatically. Empty if none is known.
 	ManualChangelogURL string
 
+	// ChangelogFilename is the changelog file resolveChangelogCmd found in
+	// the GitHub repo, if any. Set once resolution has happened (which
+	// requires the item to have been expanded at least once); empty until
+	// then or if the repo uses releases instead of a changelog file.
+	ChangelogFilename string
+
 	// LaxHeadings relaxes version-heading matching for formulae recorded
 	// in internal/changelogconfig as needing it — e.g. a changelog file
 	// that marks version sections with plain, unmarked lines rather than
@@ -61,6 +67,24 @@ func (it Item) GitHubURL() string {
 		return ""
 	}
 	return fmt.Sprintf("https://github.com/%s/%s", it.Owner, it.Repo)
+}
+
+// ChangelogURL returns the best link currently known for viewing this
+// item's changelog: a manual override if one is configured, the exact
+// changelog file once resolveChangelogCmd has found it, or the repo's
+// releases page as a reasonable default before/without that resolution.
+// Empty if no GitHub repo could be resolved and no manual override exists.
+func (it Item) ChangelogURL() string {
+	if it.ManualChangelogURL != "" {
+		return it.ManualChangelogURL
+	}
+	if it.Owner == "" {
+		return ""
+	}
+	if it.ChangelogFilename != "" {
+		return fmt.Sprintf("https://github.com/%s/%s/blob/HEAD/%s", it.Owner, it.Repo, it.ChangelogFilename)
+	}
+	return fmt.Sprintf("https://github.com/%s/%s/releases", it.Owner, it.Repo)
 }
 
 // Action is what the user asked to do when they quit the list.
@@ -364,6 +388,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, openURL(url)
 
+		case "open-changelog":
+			if len(m.items) == 0 {
+				return m, nil
+			}
+			url := m.items[m.cursor].ChangelogURL()
+			if url == "" {
+				return m, nil
+			}
+			return m, openURL(url)
+
 		case "upgrade-all":
 			for i := range m.items {
 				if m.items[i].Upgrading {
@@ -393,6 +427,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it := m.items[msg.index]
 			if msg.filename != "" {
 				m.items[msg.index].LoadingStage = msg.filename
+				m.items[msg.index].ChangelogFilename = msg.filename
 				m.refreshViewport()
 				return m, fetchChangelogFileCmd(msg.index, it, msg.filename)
 			}
@@ -476,10 +511,11 @@ func (m model) View() tea.View {
 }
 
 // helpText builds the footer hint line, including [o] only when the
-// highlighted item has a homepage distinct from its GitHub repo, and [g]
-// only when it has a resolved GitHub repo.
+// highlighted item has a homepage distinct from its GitHub repo, [g] only
+// when it has a resolved GitHub repo, and [c] whenever ChangelogURL has
+// something to open (a manual override, or a resolved GitHub repo).
 func (m model) helpText() string {
-	help := "[↑/↓, j/k, J/K] move  [enter] expand/collapse"
+	help := "[enter] expand/collapse"
 	if len(m.items) > 0 {
 		it := m.items[m.cursor]
 		var githubUrl = it.GitHubURL()
@@ -488,6 +524,9 @@ func (m model) helpText() string {
 		}
 		if githubUrl != "" {
 			help += "  [g] open github"
+		}
+		if it.ChangelogURL() != "" {
+			help += "  [c] open changelog"
 		}
 	}
 	help += "  [a] upgrade all"
