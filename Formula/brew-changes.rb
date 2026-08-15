@@ -5,21 +5,21 @@
 class BrewChanges < Formula
   desc "Interactive changelog viewer for outdated Homebrew packages"
   homepage "https://github.com/garthdw/homebrew-changes"
-  version "0.6.3"
+  version "0.6.4"
   license "MIT"
   depends_on :macos
 
   if Hardware::CPU.intel?
-    url "https://github.com/garthdw/homebrew-changes/releases/download/v0.6.3/homebrew-changes_0.6.3_darwin_amd64.tar.gz"
-    sha256 "c6d23e45c44b64f4280dfc9d30d54c6163fd099cc1a5bb01a1569faa8d50ef43"
+    url "https://github.com/garthdw/homebrew-changes/releases/download/v0.6.4/homebrew-changes_0.6.4_darwin_amd64.tar.gz"
+    sha256 "55bbf3beeff4972b0f5c0f9e36c4ce550b6888baa03631f0acaaf760f8141d86"
 
     define_method(:install) do
       bin.install "brew-changes"
     end
   end
   if Hardware::CPU.arm?
-    url "https://github.com/garthdw/homebrew-changes/releases/download/v0.6.3/homebrew-changes_0.6.3_darwin_arm64.tar.gz"
-    sha256 "879d09675370fc348a7e1038daf0710c7e4c71656a40c449f1b66300eabe7f8e"
+    url "https://github.com/garthdw/homebrew-changes/releases/download/v0.6.4/homebrew-changes_0.6.4_darwin_arm64.tar.gz"
+    sha256 "a12b3cc72fc07334e0ba10a84a2ad10f04124261dde2176253e08d1c83a29a83"
 
     define_method(:install) do
       bin.install "brew-changes"
