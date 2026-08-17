@@ -22,4 +22,5 @@ var mainMap = keymap.New("main", nil, map[string]string{
 	"c":      "open-changelog",
 	"a":      "upgrade-all",
 	"u":      "upgrade-current",
+	"?":      "help",
 })

@@ -16,9 +16,10 @@ import (
 	glamourstyles "charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 
-	"github.com/garthdw/bubblekit/statusline"
 	"github.com/garthdw/brew-changes/internal/ghsource"
 	"github.com/garthdw/brew-changes/internal/homebrew"
+	"github.com/garthdw/bubblekit/pane"
+	"github.com/garthdw/bubblekit/statusline"
 )
 
 // Item is one outdated package in the list.
@@ -121,6 +122,7 @@ type model struct {
 	action    Action
 	width     int
 	itemLines []int // line offset of each item's header within the rendered content
+	showHelp  bool
 
 	// bodyFrameCache memoizes styleBodyFrame.Render output per item index,
 	// keyed on the body content it was rendered from, so navigating the
@@ -321,8 +323,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if m.showHelp {
+			m.showHelp = false
+			return m, nil
+		}
+
 		action, _ := mainMap.Lookup(msg.String())
 		switch action {
+		case "help":
+			m.showHelp = true
+
 		case "quit":
 			m.quitting = true
 			return m, tea.Quit
@@ -508,7 +518,12 @@ func (m model) View() tea.View {
 	b.WriteString("\n\n")
 	b.WriteString(strings.Join(m.helpText(), "\n"))
 
-	v := tea.NewView(b.String())
+	content := b.String()
+	if m.showHelp {
+		content = pane.CompositeCenteredPopup(content, renderHelpPopup(m))
+	}
+
+	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
 }
@@ -545,6 +560,7 @@ func (m model) helpText() []string {
 	if len(m.items) > 0 && !m.items[m.cursor].Upgraded {
 		nodes = append(nodes, hint("[u] upgrade current", 50))
 	}
+	nodes = append(nodes, hint("[?] help", 15))
 	nodes = append(nodes, hint("[q] quit", 90))
 
 	return statusline.Render(nodes, m.width, "  ", 1)

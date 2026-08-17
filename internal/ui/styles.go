@@ -7,13 +7,14 @@ import (
 )
 
 var (
-	styleVersion   lipgloss.Style
-	styleArrow     lipgloss.Style
-	styleDim       lipgloss.Style
-	styleHeader    lipgloss.Style
-	styleSelected  lipgloss.Style
-	styleError     lipgloss.Style
-	styleBodyFrame lipgloss.Style
+	styleVersion    lipgloss.Style
+	styleArrow      lipgloss.Style
+	styleDim        lipgloss.Style
+	styleHeader     lipgloss.Style
+	styleSelected   lipgloss.Style
+	styleError      lipgloss.Style
+	styleBodyFrame  lipgloss.Style
+	styleModalPopup lipgloss.Style
 )
 
 func init() {
@@ -35,4 +36,8 @@ func ApplyTheme(t theme.Theme) {
 		BorderForeground(lipgloss.Color(c.Border.Color)).
 		Padding(0, 1).
 		MarginLeft(2)
+	styleModalPopup = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(c.Border.Color)).
+		Padding(1, 2)
 }

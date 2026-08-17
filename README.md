@@ -49,8 +49,11 @@ This will:
 | `j`/`k`     | Scroll the changelog when the highlighted package is expanded |
 | `Enter`     | Expand/collapse the highlighted package's changelog |
 | `o`         | Open the highlighted package's homepage (or GitHub repo) in your browser |
+| `g`         | Open the highlighted package's GitHub repo in your browser |
+| `c`         | Open the highlighted package's changelog in your browser |
 | `a`         | Upgrade all outdated packages and quit      |
 | `u`         | Upgrade just the highlighted package and quit |
+| `?`         | Show the help/about popup                   |
 | `q`, `Ctrl+C` | Quit without upgrading                    |
 
 Packages whose source isn't hosted on GitHub are listed with a note that no

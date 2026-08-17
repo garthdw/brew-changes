@@ -229,6 +229,49 @@ func TestUpdate_UKeyNoopWhenAlreadyUpgradedOrUpgrading(t *testing.T) {
 	}
 }
 
+func TestUpdate_QuestionMarkOpensHelp(t *testing.T) {
+	m := readyModel(testItems(2))
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "?", Code: '?'})
+	nm := updated.(model)
+	if !nm.showHelp {
+		t.Error("expected showHelp to be true after '?'")
+	}
+	if cmd != nil {
+		t.Error("expected no command when opening help")
+	}
+}
+
+func TestUpdate_AnyKeyClosesHelp(t *testing.T) {
+	tests := []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{"q", tea.KeyPressMsg{Text: "q", Code: 'q'}},
+		{"?", tea.KeyPressMsg{Text: "?", Code: '?'}},
+		{"enter", tea.KeyPressMsg{Code: tea.KeyEnter}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := readyModel(testItems(2))
+			m.showHelp = true
+
+			updated, cmd := m.Update(tt.key)
+			nm := updated.(model)
+
+			if nm.showHelp {
+				t.Error("expected showHelp to be false after keypress")
+			}
+			if cmd != nil {
+				t.Error("expected no command when closing help")
+			}
+			if nm.action != ActionNone || nm.quitting {
+				t.Error("closing help should not also quit or trigger an action")
+			}
+		})
+	}
+}
+
 func TestUpdate_UpgradeDoneMsg_Success(t *testing.T) {
 	m := readyModel(testItems(1))
 	m.items[0].Upgrading = true
