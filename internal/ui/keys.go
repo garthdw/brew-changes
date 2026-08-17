@@ -24,3 +24,15 @@ var mainMap = keymap.New("main", nil, map[string]string{
 	"u":      "upgrade-current",
 	"?":      "help",
 })
+
+// loadMainMap resolves mainMap merged with any user override at
+// ~/.config/brew-changes/keymap.json, falling back to mainMap unchanged if
+// there's no override or it can't be applied.
+func loadMainMap() *keymap.Map {
+	loaded, err := keymap.Loader{ConfigSubdir: "brew-changes"}.
+		Load("", map[string]*keymap.Map{"main": mainMap})
+	if err != nil {
+		return mainMap
+	}
+	return loaded["main"]
+}

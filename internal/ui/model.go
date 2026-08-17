@@ -146,6 +146,7 @@ func newModel(items []Item) model {
 // Run launches the interactive, fullscreen list for the given packages and
 // blocks until the user quits or confirms an upgrade.
 func Run(items []Item) (Result, error) {
+	mainMap = loadMainMap()
 	m := newModel(items)
 	p := tea.NewProgram(m)
 	finalModel, err := p.Run()

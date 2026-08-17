@@ -59,6 +59,28 @@ This will:
 Packages whose source isn't hosted on GitHub are listed with a note that no
 changelog could be found, rather than being skipped silently.
 
+#### Customizing keybindings
+
+Override any binding by creating
+`~/Library/Application Support/brew-changes/keymap.json` (or
+`$XDG_CONFIG_HOME/brew-changes/keymap.json` if you have `XDG_CONFIG_HOME` set):
+
+```json
+{
+  "main": {
+    "x": "quit",
+    "q": null
+  }
+}
+```
+
+Each entry maps a key (as reported by Bubble Tea, e.g. `"ctrl+e"`, `"esc"`) to
+an action name, or to `null` to unbind it. Valid action names: `quit`,
+`move-up`, `move-down`, `move-up-or-scroll-up`, `move-down-or-scroll-down`,
+`toggle-expand`, `open-homepage`, `open-github`, `open-changelog`,
+`upgrade-all`, `upgrade-current`, `help`. The help popup (`?`) always reflects
+your active bindings.
+
 ## GitHub API rate limits
 
 `brew changes` talks to the GitHub API directly. Unauthenticated requests are
