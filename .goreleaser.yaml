@@ -30,10 +30,11 @@ brews:
   - name: brew-changes
     repository:
       owner: garthdw
-      name: homebrew-changes
+      name: homebrew-tap
       branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
-    homepage: "https://github.com/garthdw/homebrew-changes"
+    homepage: "https://github.com/garthdw/brew-changes"
     description: "Interactive changelog viewer for outdated Homebrew packages"
     license: "MIT"
     commit_author:

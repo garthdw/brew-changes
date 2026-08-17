@@ -17,8 +17,8 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/garthdw/bubblekit/statusline"
-	"github.com/garthdw/homebrew-changes/internal/ghsource"
-	"github.com/garthdw/homebrew-changes/internal/homebrew"
+	"github.com/garthdw/brew-changes/internal/ghsource"
+	"github.com/garthdw/brew-changes/internal/homebrew"
 )
 
 // Item is one outdated package in the list.

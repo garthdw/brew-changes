@@ -1,4 +1,4 @@
-module github.com/garthdw/homebrew-changes
+module github.com/garthdw/brew-changes
 
 go 1.26.5
 

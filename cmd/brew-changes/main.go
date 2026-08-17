@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/garthdw/homebrew-changes/internal/changelogconfig"
-	"github.com/garthdw/homebrew-changes/internal/ghsource"
-	"github.com/garthdw/homebrew-changes/internal/homebrew"
-	"github.com/garthdw/homebrew-changes/internal/ui"
+	"github.com/garthdw/brew-changes/internal/changelogconfig"
+	"github.com/garthdw/brew-changes/internal/ghsource"
+	"github.com/garthdw/brew-changes/internal/homebrew"
+	"github.com/garthdw/brew-changes/internal/ui"
 )
 
 func main() {

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/garthdw/homebrew-changes/internal/changelog"
+	"github.com/garthdw/brew-changes/internal/changelog"
 )
 
 var (

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`homebrew-changes` is both the source for a Go CLI (`brew changes`) and its own Homebrew tap. The CLI shows what actually changed in outdated Homebrew formulae/casks (changelog or GitHub release notes) before the user upgrades, via an interactive Bubble Tea TUI.
+`brew-changes` is the source for a Go CLI (`brew changes`), published as a formula in the shared `garthdw/homebrew-tap`. The CLI shows what actually changed in outdated Homebrew formulae/casks (changelog or GitHub release notes) before the user upgrades, via an interactive Bubble Tea TUI.
 
 ## Commands
 

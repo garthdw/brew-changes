@@ -3,7 +3,7 @@ package ui
 import (
 	"charm.land/lipgloss/v2"
 
-	"github.com/garthdw/homebrew-changes/internal/theme"
+	"github.com/garthdw/brew-changes/internal/theme"
 )
 
 var (

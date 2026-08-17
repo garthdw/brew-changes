@@ -1,4 +1,4 @@
-# homebrew-changes
+# brew-changes
 
 A Homebrew tap that adds `brew changes`: before you upgrade, see what actually
 changed.
@@ -18,7 +18,7 @@ GitHub Releases, then upgrade everything or just the one you're looking at.
 ## Install
 
 ```sh
-brew install garthdw/changes/brew-changes
+brew install garthdw/tap/brew-changes
 ```
 
 This installs a prebuilt binary — no Go toolchain required.
