@@ -4,6 +4,8 @@
   "automake": { "url": "https://git.savannah.gnu.org/cgit/automake.git/plain/NEWS" },
   "awscli": { "url": "https://github.com/aws/aws-cli/blob/v2/CHANGELOG.rst" },
   "bash": { "url": "https://git.savannah.gnu.org/cgit/bash.git/plain/NEWS" },
+  "claude-code": { "url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md" },
+  "claude-code@latest": { "url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md" },
   "coreutils": { "url": "https://raw.githubusercontent.com/coreutils/coreutils/master/NEWS" },
   "curl": { "url": "https://curl.se/changes.html" },
   "dart-lang/dart/dart": { "url": "https://github.com/dart-lang/sdk/blob/main/CHANGELOG.md" },
@@ -46,5 +48,7 @@
   "tmux": { "lax_headings": true },
   "tree": { "lax_headings": true },
   "wget": { "url": "https://git.savannah.gnu.org/cgit/wget.git/plain/NEWS" },
-  "xz": { "lax_headings": true }
+  "xz": { "lax_headings": true },
+  "zed": { "url": "https://github.com/zed-industries/zed/releases" },
+  "zed@preview": { "url": "https://github.com/zed-industries/zed/releases" }
 }
