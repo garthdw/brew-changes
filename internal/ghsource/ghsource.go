@@ -90,6 +90,12 @@ func token() string {
 	return tokenValue
 }
 
+// httpClient is used for every GitHub API request. It sets an overall
+// timeout because http.DefaultClient has none: a connection that opens but
+// then stalls (flaky wifi, VPN, captive portal, ...) would otherwise hang
+// the request forever with no way for the caller to retry or abort.
+var httpClient = &http.Client{Timeout: 15 * time.Second}
+
 func get(url string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -99,7 +105,7 @@ func get(url string) (*http.Response, error) {
 	if t := token(); t != "" {
 		req.Header.Set("Authorization", "Bearer "+t)
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 // getJSON fetches url and unmarshals the JSON response body into out.

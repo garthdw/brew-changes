@@ -147,6 +147,8 @@ func newModel(items []Item) model {
 // blocks until the user quits or confirms an upgrade.
 func Run(items []Item) (Result, error) {
 	mainMap = loadMainMap()
+	// Must run before tea.NewProgram claims stdin, or this races with its input reader.
+	darkBackground = lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 	m := newModel(items)
 	p := tea.NewProgram(m)
 	finalModel, err := p.Run()
@@ -268,9 +270,12 @@ func openURL(url string) tea.Cmd {
 	}
 }
 
+// darkBackground is resolved once in Run (see there for why).
+var darkBackground bool
+
 func renderMarkdown(raw string) string {
 	style := glamourstyles.LightStyle
-	if lipgloss.HasDarkBackground(os.Stdin, os.Stdout) {
+	if darkBackground {
 		style = glamourstyles.DarkStyle
 	}
 	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle(style), glamour.WithWordWrap(96))
