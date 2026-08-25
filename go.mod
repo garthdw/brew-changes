@@ -1,13 +1,13 @@
 module github.com/garthdw/brew-changes
 
-go 1.26.5
+go 1.27.0
 
 require (
 	charm.land/bubbles/v2 v2.2.1
 	charm.land/bubbletea/v2 v2.0.9
 	charm.land/glamour/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/garthdw/bubblekit v0.3.0
+	github.com/garthdw/bubblekit v0.4.0
 )
 
 require (
