@@ -38,7 +38,7 @@ Arrow keys (`up`/`down`) always move the cursor between items. `j`/`k` are dual-
 
 ### Release pipeline
 
-Publishing a GitHub Release (tag `vX.Y.Z`) triggers `.github/workflows/release.yml`, which runs GoReleaser to cross-compile macOS binaries (arm64 + amd64, no CGO), attach them to the release, and auto-commit the regenerated `Formula/brew-changes.rb` to `main` via GoReleaser's `brews` publisher (configured in `.goreleaser.yaml`). **`Formula/brew-changes.rb` is generated — don't hand-edit it**, edit `.goreleaser.yaml`'s `brews:` block instead. Note: GoReleaser has soft-deprecated `brews` in favor of `homebrew_casks`, but the installed GoReleaser version doesn't yet implement a formula-generating replacement, so `brews` (with its deprecation warning) is intentional here, not an oversight.
+Publishing a GitHub Release (tag `vX.Y.Z`) triggers `.github/workflows/release.yml`, which runs GoReleaser to cross-compile macOS and Linux binaries (arm64 + amd64, no CGO), attach them to the release, and auto-commit the regenerated `Formula/brew-changes.rb` to `main` via GoReleaser's `brews` publisher (configured in `.goreleaser.yaml`). **`Formula/brew-changes.rb` is generated — don't hand-edit it**, edit `.goreleaser.yaml`'s `brews:` block instead. Note: GoReleaser has soft-deprecated `brews` in favor of `homebrew_casks`, but the installed GoReleaser version doesn't yet implement a formula-generating replacement, so `brews` (with its deprecation warning) is intentional here, not an oversight.
 
 There is no `vendor/` directory — it was intentionally removed once the formula switched from building from source to downloading prebuilt binaries, since Homebrew no longer needs to `go build` in a network-restricted sandbox.
 

@@ -99,6 +99,6 @@ fallback when neither environment variable is set.
 
 Publishing a GitHub Release (with a `vX.Y.Z` tag) triggers
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which runs
-[GoReleaser](https://goreleaser.com) to build macOS binaries (arm64 + amd64)
-and attach them to the release, then auto-commits the regenerated
+[GoReleaser](https://goreleaser.com) to build macOS and Linux binaries (arm64
++ amd64) and attach them to the release, then auto-commits the regenerated
 `Formula/brew-changes.rb` to `main` with the new version/url/sha256.
