@@ -55,6 +55,25 @@ func ResolveRepo(homepage, url string) (owner, repo string, ok bool) {
 	return repoFromURL(url)
 }
 
+// manualReleasesListingPattern matches a bare GitHub releases listing page
+// (as opposed to a specific file, blob, or individual release) — the shape
+// changelogconfig entries use for formulae with a real GitHub repo that
+// Homebrew's homepage/url fields don't reference (see changelog_config.json).
+var manualReleasesListingPattern = regexp.MustCompile(`^https://github\.com/([^/]+)/([^/]+)/releases/?$`)
+
+// ResolveManualReleasesRepo returns the owner/repo if rawURL is exactly a
+// GitHub repo's bare releases listing page. Such URLs should be treated as
+// a known GitHub repo and processed through the Releases API rather than
+// fetched as a raw changelog file — the listing page itself is HTML, not
+// something FetchManualSection can render.
+func ResolveManualReleasesRepo(rawURL string) (owner, repo string, ok bool) {
+	m := manualReleasesListingPattern.FindStringSubmatch(rawURL)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
 func repoFromURL(url string) (owner, repo string, ok bool) {
 	m := githubURLPattern.FindStringSubmatch(url)
 	if m == nil {
@@ -435,6 +454,7 @@ type Release struct {
 	TagName     string `json:"tag_name"`
 	PublishedAt string `json:"published_at"`
 	Body        string `json:"body"`
+	Prerelease  bool   `json:"prerelease"`
 }
 
 const maxReleasePages = 3
@@ -442,7 +462,10 @@ const maxReleasePages = 3
 // TagMatchesVersion reports whether a release tag identifies the given
 // plain version string (e.g. Homebrew's "1.8.1"), regardless of whatever
 // prefix the upstream project puts on its tags: "v1.8.1", "jq-1.8.1", and
-// even "2024-edition-v1.8.1" all match "1.8.1".
+// even "2024-edition-v1.8.1" all match "1.8.1". A trailing "-pre" (as used
+// by preview/nightly channels, e.g. zed@preview's "v1.20.0-pre") is
+// stripped before matching, so those tags can also serve as the walk's
+// installed/target boundary.
 //
 // A tag matches if it ends with the version and the character immediately
 // before that suffix is neither a digit nor '.'. That boundary check is
@@ -454,6 +477,7 @@ func TagMatchesVersion(tag, version string) bool {
 	if version == "" {
 		return false
 	}
+	tag = strings.TrimSuffix(tag, "-pre")
 	if exactSuffixMatch(tag, version) {
 		return true
 	}

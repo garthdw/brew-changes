@@ -237,6 +237,12 @@ func fetchReleasesCmd(index int, it Item) tea.Cmd {
 		if err != nil || len(releases) == 0 {
 			return bodyFetchedMsg{index: index, body: "No changelog file or GitHub releases found for this package."}
 		}
+		if strings.HasSuffix(it.Name, "@preview") {
+			releases = filterPrereleases(releases)
+			if len(releases) == 0 {
+				return bodyFetchedMsg{index: index, body: "No GitHub pre-releases found for this package."}
+			}
+		}
 		if len(releases) > maxDisplayedReleases {
 			releases = releases[:maxDisplayedReleases]
 		}
@@ -247,6 +253,19 @@ func fetchReleasesCmd(index int, it Item) tea.Cmd {
 		body := "(from GitHub releases)\n\n" + renderMarkdown(b.String())
 		return bodyFetchedMsg{index: index, body: body}
 	}
+}
+
+// filterPrereleases keeps only GitHub-flagged pre-releases, for "@preview"
+// packages (e.g. zed@preview) whose release history is interleaved with the
+// stable channel's releases.
+func filterPrereleases(releases []ghsource.Release) []ghsource.Release {
+	filtered := releases[:0]
+	for _, r := range releases {
+		if r.Prerelease {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }
 
 type upgradeDoneMsg struct {

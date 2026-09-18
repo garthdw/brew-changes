@@ -63,6 +63,14 @@ func run() error {
 		var owner, repo string
 		if !hasManualOverride {
 			owner, repo, _ = ghsource.ResolveRepo(info.Homepage, info.URL)
+		} else if relOwner, relRepo, ok := ghsource.ResolveManualReleasesRepo(manualChangelogURL); ok {
+			// The override is just a bare GitHub releases listing page
+			// (e.g. gemini-cli, pnpm, zed) — use the normal GitHub
+			// Releases API path instead of fetching that HTML page as if
+			// it were a raw changelog file.
+			owner, repo = relOwner, relRepo
+			hasManualOverride = false
+			manualChangelogURL = ""
 		}
 
 		items = append(items, ui.Item{
