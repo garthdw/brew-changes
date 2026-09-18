@@ -184,16 +184,20 @@ type changelogResolvedMsg struct {
 // filename with its own round trip.
 func resolveChangelogCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
-		if it.Owner == "" {
-			if it.ManualChangelogURL != "" {
-				if section, ok := ghsource.FetchManualSection(it.ManualChangelogURL, it.Current, it.Installed, it.LaxHeadings); ok {
-					body := fmt.Sprintf("(from %s)", it.ManualChangelogURL) + "\n\n" + renderMarkdown(section)
-					return bodyFetchedMsg{index: index, body: body}
+		if it.ManualChangelogURL != "" {
+			section, fetched, _, contentType := ghsource.FetchManualSection(it.ManualChangelogURL, it.Current, it.Installed, it.LaxHeadings)
+			if !fetched {
+				reason := "Could not fetch the configured changelog URL."
+				if strings.Contains(contentType, "html") {
+					reason = "The configured changelog is an HTML page, which can't be rendered here."
 				}
-				body := "No GitHub repository could be resolved automatically for this package.\n\n" +
-					renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualChangelogURL))
+				body := reason + "\n\n" + renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualChangelogURL))
 				return bodyFetchedMsg{index: index, body: body}
 			}
+			body := fmt.Sprintf("(from %s)", it.ManualChangelogURL) + "\n\n" + renderMarkdown(section)
+			return bodyFetchedMsg{index: index, body: body}
+		}
+		if it.Owner == "" {
 			return bodyFetchedMsg{index: index, body: "No GitHub repository could be resolved for this package; changelog unavailable."}
 		}
 		name, useReleases := ghsource.ResolveChangelogSource(it.Owner, it.Repo)

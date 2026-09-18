@@ -2,6 +2,8 @@ package ui
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -126,6 +128,20 @@ func TestResolveChangelogCmd_NoRepoWithManualURL(t *testing.T) {
 	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
 	if !strings.Contains(msg.body, "https://example.com/rust/RELEASES.md") {
 		t.Errorf("expected body to mention the manual changelog URL, got %q", msg.body)
+	}
+}
+
+func TestResolveChangelogCmd_ManualURLServesHTML(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte("<html><body>not a changelog</body></html>"))
+	}))
+	defer srv.Close()
+
+	it := Item{Name: "rust", ManualChangelogURL: srv.URL}
+	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
+	if !strings.Contains(msg.body, "HTML page") {
+		t.Errorf("expected body to mention the HTML-specific reason, got %q", msg.body)
 	}
 }
 

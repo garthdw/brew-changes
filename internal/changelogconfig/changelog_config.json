@@ -6,7 +6,7 @@
   "bash": { "url": "https://git.savannah.gnu.org/cgit/bash.git/plain/NEWS" },
   "claude-code": { "url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md" },
   "claude-code@latest": { "url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md" },
-  "coreutils": { "url": "https://raw.githubusercontent.com/coreutils/coreutils/master/NEWS" },
+  "coreutils": { "url": "https://raw.githubusercontent.com/coreutils/coreutils/master/NEWS", "lax_headings": true },
   "curl": { "url": "https://curl.se/changes.html" },
   "dart-lang/dart/dart": { "url": "https://github.com/dart-lang/sdk/blob/main/CHANGELOG.md" },
   "docker": { "url": "https://docs.docker.com/engine/release-notes/" },

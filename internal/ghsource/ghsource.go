@@ -156,7 +156,8 @@ func fetchGitHubFile(owner, repo, path, ref string) (content string, ok bool) {
 		rawRef = "HEAD"
 	}
 	rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, rawRef, path)
-	return FetchRaw(rawURL)
+	content, ok, _ = FetchRaw(rawURL)
+	return content, ok
 }
 
 var (
@@ -183,56 +184,64 @@ func parseGitHubFileURL(rawURL string) (owner, repo, ref, path string, ok bool) 
 // intermittently even when the file is perfectly reachable.
 const rawFetchAttempts = 3
 
-// FetchRaw fetches an arbitrary URL as plain text. ok is false if the
-// response looks like HTML (unusable by changelog.TrimToRange) or every
-// attempt fails. Only transient failures (network errors, 5xx) are
-// retried — a 404 or HTML response won't change on retry.
-func FetchRaw(rawURL string) (content string, ok bool) {
+// FetchRaw fetches an arbitrary URL as plain text.
+// Only transient failures (network
+// errors, 5xx) are retried — a 404 or HTML response won't change on retry.
+func FetchRaw(rawURL string) (content string, ok bool, contentType string) {
 	for attempt := 0; attempt < rawFetchAttempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(300 * time.Millisecond)
 		}
 		var retryable bool
-		content, ok, retryable = fetchRawOnce(rawURL)
+		content, ok, contentType, retryable = fetchRawOnce(rawURL)
 		if ok || !retryable {
-			return content, ok
+			return content, ok, contentType
 		}
 	}
-	return "", false
+	return "", false, ""
 }
 
-func fetchRawOnce(rawURL string) (content string, ok bool, retryable bool) {
+func fetchRawOnce(rawURL string) (content string, ok bool, contentType string, retryable bool) {
 	resp, err := http.Get(rawURL)
 	if err != nil {
-		return "", false, true
+		return "", false, "", true
 	}
 	defer resp.Body.Close()
+	contentType = resp.Header.Get("Content-Type")
 	if resp.StatusCode != http.StatusOK {
-		return "", false, resp.StatusCode >= 500
+		return "", false, contentType, resp.StatusCode >= 500
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "html") {
-		return "", false, false
+		return "", false, contentType, false
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", false, true
+		return "", false, contentType, true
 	}
-	return string(body), true, false
+	return string(body), true, contentType, false
 }
 
 // FetchManualSection fetches a manually-configured changelog URL (see
 // changelogconfig) and trims it to the section documenting newVersion.
-func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (section string, ok bool) {
+// fetched is false if the URL itself couldn't be retrieved, or its content
+// is HTML rather than plain text/Markdown — either
+// way there's no content to render. section is still populated (with a
+// fallback excerpt) even when found is false, i.e. the file was fetched but
+// doesn't document newVersion under a recognized heading.
+func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (section string, fetched bool, found bool, contentType string) {
 	var content string
+	var ok bool
 	if owner, repo, ref, path, isGitHub := parseGitHubFileURL(rawURL); isGitHub {
 		content, ok = fetchGitHubFile(owner, repo, path, ref)
+		contentType = "text/Markdown"
 	} else {
-		content, ok = FetchRaw(rawURL)
+		content, ok, contentType = FetchRaw(rawURL)
 	}
 	if !ok {
-		return "", false
+		return "", false, false, contentType
 	}
-	return changelog.TrimToRange(content, newVersion, installedVersion, lax)
+	section, found = changelog.TrimToRange(content, newVersion, installedVersion, lax)
+	return section, true, found, contentType
 }
 
 // FetchChangelogSection fetches filename's content and trims it to the
@@ -505,9 +514,10 @@ func normalizeVersionComponent(s string) string {
 // FetchReleases returns releases newer than installedVersion, newest first,
 // stopping at the release matching installedVersion and otherwise capping
 // out at 20. If targetVersion is non-empty, the single page of up to 100
-// releases is searched for a match instead of capping at 20: if found, it's
-// included as the last entry returned; if not, the result is truncated back
-// down to 20 as a best-effort fallback rather than treated as an error.
+// releases is searched for it instead of capping at 20 while accumulating;
+// if the search reaches the end of that page without finding
+// installedVersion, the result is truncated back down to 20 as a
+// best-effort fallback rather than treated as an error.
 //
 // Some repos (docker/cli, vim/vim, ...) never publish GitHub Releases at
 // all — they just tag commits directly. When the Releases API comes back
@@ -530,14 +540,16 @@ func FetchReleases(owner, repo, installedVersion, targetVersion string) ([]Relea
 // appendLatestIfMissing works around a GitHub API quirk where a release
 // published very recently can be absent from the paginated /releases list
 // (its search index lags behind) even though /releases/latest already
-// reflects it. If targetVersion wasn't found in filtered, this checks
-// /releases/latest and appends it on a match.
+// reflects it. If targetVersion wasn't found anywhere in filtered, this
+// checks /releases/latest and appends it on a match.
 func appendLatestIfMissing(owner, repo string, filtered []Release, targetVersion string) []Release {
 	if targetVersion == "" {
 		return filtered
 	}
-	if len(filtered) > 0 && TagMatchesVersion(filtered[len(filtered)-1].TagName, targetVersion) {
-		return filtered
+	for _, r := range filtered {
+		if TagMatchesVersion(r.TagName, targetVersion) {
+			return filtered
+		}
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBaseURL, owner, repo)
 	var latest Release
@@ -549,15 +561,22 @@ func appendLatestIfMissing(owner, repo string, filtered []Release, targetVersion
 
 // accumulateRelease appends r to filtered and reports whether the caller
 // should stop paging: once installedVersion is matched (r itself is
-// excluded, since everything from here on is already installed), once
-// targetVersion is matched (r is the last entry included), or, when
+// excluded, since everything from here on is already installed), or, when
 // targetVersion is empty, once the 20-item cap is reached.
+//
+// When installedVersion is empty there's no other bound to walk to, so a
+// targetVersion match stops the search there instead (used when hunting for
+// a tag that might sit past the old 20-item cap). With installedVersion
+// set — the normal case — a target match must NOT stop the walk: target is
+// usually the newest release, and stopping there would silently drop any
+// older-but-still-unreleased versions between it and installedVersion (e.g.
+// an upgrade that skipped a release).
 func accumulateRelease(filtered []Release, r Release, installedVersion, targetVersion string) ([]Release, bool) {
 	if TagMatchesVersion(r.TagName, installedVersion) {
 		return filtered, true
 	}
 	filtered = append(filtered, r)
-	if TagMatchesVersion(r.TagName, targetVersion) {
+	if installedVersion == "" && TagMatchesVersion(r.TagName, targetVersion) {
 		return filtered, true
 	}
 	if targetVersion == "" && len(filtered) >= 20 {

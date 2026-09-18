@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -166,9 +167,12 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		content, ok := FetchRaw(srv.URL)
+		content, ok, contentType := FetchRaw(srv.URL)
 		if !ok {
 			t.Fatalf("ok = false, want true")
+		}
+		if strings.Contains(contentType, "html") {
+			t.Errorf("contentType = %q, want non-html", contentType)
 		}
 		if content != "## 1.2.3\n\nsome notes\n" {
 			t.Errorf("got %q", content)
@@ -182,8 +186,12 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, ok := FetchRaw(srv.URL); ok {
+		_, ok, contentType := FetchRaw(srv.URL)
+		if ok {
 			t.Errorf("ok = true, want false for html content-type")
+		}
+		if !strings.Contains(contentType, "html") {
+			t.Errorf("contentType = %q, want html", contentType)
 		}
 	})
 
@@ -193,7 +201,7 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, ok := FetchRaw(srv.URL); ok {
+		if _, ok, _ := FetchRaw(srv.URL); ok {
 			t.Errorf("ok = true, want false for 404")
 		}
 	})
@@ -206,9 +214,9 @@ func TestFetchManualSection_NonGitHub(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	section, ok := FetchManualSection(srv.URL, "2.0.0", "1.0.0", false)
-	if !ok {
-		t.Fatalf("ok = false, want true")
+	section, fetched, found, _ := FetchManualSection(srv.URL, "2.0.0", "1.0.0", false)
+	if !fetched || !found {
+		t.Fatalf("fetched = %v, found = %v, want true, true", fetched, found)
 	}
 	if section != "## 2.0.0\nnew stuff" {
 		t.Errorf("got %q", section)
@@ -224,9 +232,9 @@ func TestFetchManualSection_GitHubBlobURL(t *testing.T) {
 	// FetchManualSection parses owner/repo/path from the URL itself and
 	// hits apiBaseURL (overridden to srv.URL) rather than the URL's host,
 	// so any github.com blob URL resolves through the test server.
-	section, ok := FetchManualSection("https://github.com/owner/repo/blob/main/CHANGELOG.md", "2.0.0", "1.0.0", false)
-	if !ok {
-		t.Fatalf("ok = false, want true")
+	section, fetched, found, _ := FetchManualSection("https://github.com/owner/repo/blob/main/CHANGELOG.md", "2.0.0", "1.0.0", false)
+	if !fetched || !found {
+		t.Fatalf("fetched = %v, found = %v, want true, true", fetched, found)
 	}
 	if section != "## 2.0.0\nnew stuff" {
 		t.Errorf("got %q", section)
@@ -443,6 +451,30 @@ func TestFetchReleases_TargetVersionBeyondTwentyButWithinFirstPage(t *testing.T)
 	}
 	if last := releases[len(releases)-1]; last.TagName != "v25.0.0" {
 		t.Errorf("last release = %q, want v25.0.0", last.TagName)
+	}
+}
+
+func TestFetchReleases_SkippedVersionIncludesIntermediateRelease(t *testing.T) {
+	page := []Release{
+		{TagName: "v0.34.2", Body: "latest notes"},
+		{TagName: "v0.34.1", Body: "skipped notes"},
+		{TagName: "v0.34.0", Body: "installed notes"},
+	}
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal(page)
+		w.Write(body)
+	})
+
+	// Reproduces an upgrade that skips a release (installed 0.34.0, current
+	// 0.34.2): the target version (0.34.2) is the newest entry, so it must
+	// not be treated as a stopping point — v0.34.1 in between also needs to
+	// be included.
+	releases, err := FetchReleases("o", "r", "0.34.0", "0.34.2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 2 || releases[0].TagName != "v0.34.2" || releases[1].TagName != "v0.34.1" {
+		t.Fatalf("got %+v, want [v0.34.2, v0.34.1]", releases)
 	}
 }
 
