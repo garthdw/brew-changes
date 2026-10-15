@@ -9,6 +9,8 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/garthdw/brew-changes/internal/ghsource"
 )
 
 func testItems(n int) []Item {
@@ -124,7 +126,7 @@ func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 }
 
 func TestResolveChangelogCmd_NoRepoWithManualURL(t *testing.T) {
-	it := Item{Name: "rust", ManualChangelogURL: "https://example.com/rust/RELEASES.md"}
+	it := Item{Name: "rust", Source: ghsource.Source{ManualURL: "https://example.com/rust/RELEASES.md"}}
 	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
 	if !strings.Contains(msg.body, "https://example.com/rust/RELEASES.md") {
 		t.Errorf("expected body to mention the manual changelog URL, got %q", msg.body)
@@ -138,7 +140,7 @@ func TestResolveChangelogCmd_ManualURLServesHTML(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	it := Item{Name: "rust", ManualChangelogURL: srv.URL}
+	it := Item{Name: "rust", Source: ghsource.Source{ManualURL: srv.URL}}
 	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
 	if !strings.Contains(msg.body, "HTML page") {
 		t.Errorf("expected body to mention the HTML-specific reason, got %q", msg.body)

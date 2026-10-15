@@ -11,6 +11,7 @@ package main
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,9 +22,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/garthdw/brew-changes/internal/changelogconfig"
 	"github.com/garthdw/brew-changes/internal/ghsource"
 	"github.com/garthdw/brew-changes/internal/homebrew"
+	"github.com/garthdw/brew-changes/internal/version"
 )
 
 type analyticsResponse struct {
@@ -35,10 +36,10 @@ type analyticsResponse struct {
 type result struct {
 	name        string
 	owner, repo string
-	source      string // "file:<name>", "releases", "no-repo", "skip-tap"
+	source      string // "file:<name>", "releases", "manual", "no-repo", "skip-tap"
 	found       bool
 	skipped     bool
-	manual      bool // recovered via changelog_config.json rather than auto-detection
+	manual      bool // resolved via a changelog_config.json URL rather than auto-detection
 	partial     bool // releases fetched, but the target version's tag wasn't among them (best effort)
 	note        string
 }
@@ -84,17 +85,6 @@ func main() {
 		})
 	}
 	wg.Wait()
-
-	for i := range results {
-		r := &results[i]
-		if r.skipped || r.found {
-			continue
-		}
-		if url, ok := changelogconfig.Lookup(r.name); ok {
-			r.manual = true
-			r.note = "manual: " + url
-		}
-	}
 
 	slices.SortFunc(results, func(a, b result) int { return cmp.Compare(a.name, b.name) })
 
@@ -180,13 +170,17 @@ func filterUntapped(names []string) (resolvable []string, skipped []result, err 
 func validate(name string, info homebrew.Info) result {
 	r := result{name: name}
 
-	owner, repo, ok := ghsource.ResolveRepo(info.Homepage, info.URL)
-	if !ok {
+	src := ghsource.ResolveSource(name, info.Homepage, info.URL)
+	owner, repo := src.Owner, src.Repo
+	r.owner, r.repo = owner, repo
+	switch {
+	case src.ManualURL != "":
+		return validateManual(r, src, info.Version)
+	case owner == "":
 		r.source = "no-repo"
 		r.note = fmt.Sprintf("homepage=%s url=%s", info.Homepage, info.URL)
 		return r
 	}
-	r.owner, r.repo = owner, repo
 
 	filename, useReleases := ghsource.ResolveChangelogSource(owner, repo)
 	if useReleases {
@@ -200,7 +194,7 @@ func validate(name string, info homebrew.Info) result {
 			r.note = "no releases found"
 			return r
 		}
-		if last := releases[len(releases)-1]; ghsource.TagMatchesVersion(last.TagName, info.Version) {
+		if last := releases[len(releases)-1]; version.MatchesTag(last.TagName, info.Version) {
 			r.found = true
 			r.note = fmt.Sprintf("matched tag=%s", last.TagName)
 			return r
@@ -211,12 +205,34 @@ func validate(name string, info homebrew.Info) result {
 	}
 
 	r.source = "file:" + filename
-	section, found := ghsource.FetchChangelogSection(owner, repo, filename, info.Version, "", changelogconfig.LaxHeadings(name))
+	section, found := ghsource.FetchChangelogSection(owner, repo, filename, info.Version, "", src.LaxHeadings)
 	r.found = found
 	if !found {
 		r.note = "version heading not located"
 	} else {
 		r.note = fmt.Sprintf("%d bytes", len(section))
+	}
+	return r
+}
+
+// validateManual fetches a configured changelog URL the same way the TUI
+// does. HTML pages count as manual matches, since the TUI shows them as a
+// link to open rather than rendering them.
+func validateManual(r result, src ghsource.Source, version string) result {
+	r.source = "manual"
+	section, found, err := ghsource.FetchManualSection(src.ManualURL, version, "", src.LaxHeadings)
+	switch {
+	case errors.Is(err, ghsource.ErrHTML):
+		r.manual = true
+		r.note = "link only (HTML): " + src.ManualURL
+	case err != nil:
+		r.note = "fetch error: " + err.Error()
+	case !found:
+		r.note = "version heading not located: " + src.ManualURL
+	default:
+		r.manual = true
+		r.found = true
+		r.note = fmt.Sprintf("%d bytes from %s", len(section), src.ManualURL)
 	}
 	return r
 }

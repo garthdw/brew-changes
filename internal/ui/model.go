@@ -4,6 +4,7 @@ package ui
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,25 +31,14 @@ type Item struct {
 	Installed string
 	Current   string
 	Homepage  string // package homepage, empty if unknown
-	Owner     string // GitHub owner, empty if no repo could be resolved
-	Repo      string // GitHub repo name
 
-	// ManualChangelogURL is a manually curated changelog/release-notes
-	// link (see internal/changelogconfig) used when no GitHub repo could
-	// be resolved automatically. Empty if none is known.
-	ManualChangelogURL string
+	ghsource.Source
 
 	// ChangelogFilename is the changelog file resolveChangelogCmd found in
 	// the GitHub repo, if any. Set once resolution has happened (which
 	// requires the item to have been expanded at least once); empty until
 	// then or if the repo uses releases instead of a changelog file.
 	ChangelogFilename string
-
-	// LaxHeadings relaxes version-heading matching for formulae recorded
-	// in internal/changelogconfig as needing it — e.g. a changelog file
-	// that marks version sections with plain, unmarked lines rather than
-	// Markdown headings.
-	LaxHeadings bool
 
 	Expanded bool
 	// LoadingStage is non-empty while the body is being fetched: "changelog"
@@ -80,8 +70,8 @@ func (it Item) GitHubURL() string {
 // releases page as a reasonable default before/without that resolution.
 // Empty if no GitHub repo could be resolved and no manual override exists.
 func (it Item) ChangelogURL() string {
-	if it.ManualChangelogURL != "" {
-		return it.ManualChangelogURL
+	if it.ManualURL != "" {
+		return it.ManualURL
 	}
 	if it.Owner == "" {
 		return ""
@@ -187,17 +177,17 @@ type changelogResolvedMsg struct {
 // filename with its own round trip.
 func resolveChangelogCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
-		if it.ManualChangelogURL != "" {
-			section, fetched, _, contentType := ghsource.FetchManualSection(it.ManualChangelogURL, it.Current, it.Installed, it.LaxHeadings)
-			if !fetched {
+		if it.ManualURL != "" {
+			section, _, err := ghsource.FetchManualSection(it.ManualURL, it.Current, it.Installed, it.LaxHeadings)
+			if err != nil {
 				reason := "Could not fetch the configured changelog URL."
-				if strings.Contains(contentType, "html") {
+				if errors.Is(err, ghsource.ErrHTML) {
 					reason = "The configured changelog is an HTML page, which can't be rendered here."
 				}
-				body := reason + "\n\n" + renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualChangelogURL))
+				body := reason + "\n\n" + renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualURL))
 				return bodyFetchedMsg{index: index, body: body}
 			}
-			body := fmt.Sprintf("(from %s)", it.ManualChangelogURL) + "\n\n" + renderMarkdown(section)
+			body := fmt.Sprintf("(from %s)", it.ManualURL) + "\n\n" + renderMarkdown(section)
 			return bodyFetchedMsg{index: index, body: body}
 		}
 		if it.Owner == "" {
@@ -240,7 +230,7 @@ func fetchReleasesCmd(index int, it Item) tea.Cmd {
 		if err != nil || len(releases) == 0 {
 			return bodyFetchedMsg{index: index, body: "No changelog file or GitHub releases found for this package."}
 		}
-		if strings.HasSuffix(it.Name, "@preview") {
+		if it.PrereleasesOnly {
 			releases = filterPrereleases(releases)
 			if len(releases) == 0 {
 				return bodyFetchedMsg{index: index, body: "No GitHub pre-releases found for this package."}
@@ -258,9 +248,8 @@ func fetchReleasesCmd(index int, it Item) tea.Cmd {
 	}
 }
 
-// filterPrereleases keeps only GitHub-flagged pre-releases, for "@preview"
-// packages (e.g. zed@preview) whose release history is interleaved with the
-// stable channel's releases.
+// filterPrereleases keeps only GitHub-flagged pre-releases (see
+// ghsource.Source.PrereleasesOnly).
 func filterPrereleases(releases []ghsource.Release) []ghsource.Release {
 	filtered := releases[:0]
 	for _, r := range releases {
@@ -627,7 +616,7 @@ func (m model) renderList() (string, []int) {
 		sourceHint := hintStyle.Render("[no changelog source]")
 		if it.Owner != "" {
 			sourceHint = hintStyle.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
-		} else if it.ManualChangelogURL != "" {
+		} else if it.ManualURL != "" {
 			sourceHint = hintStyle.Render("[known changelog]")
 		}
 

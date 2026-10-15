@@ -5,6 +5,8 @@ package changelog
 import (
 	"fmt"
 	"strings"
+
+	"github.com/garthdw/brew-changes/internal/version"
 )
 
 // MaxContentLines caps how much of a changelog is shown when the exact
@@ -50,20 +52,20 @@ func TrimToRange(content, newVersion, installedVersion string, lax bool) (string
 }
 
 // findHeading returns the index of the first heading line containing
-// version, or -1 if none is found. Both ATX (`# text`) and Setext (`text`
+// v, or -1 if none is found. Both ATX (`# text`) and Setext (`text`
 // underlined with `===`/`---`) markdown headings are recognized, since
 // some changelogs (e.g. fzf, ripgrep) use the latter exclusively. When lax
 // is true, any non-blank line counts as a heading candidate, for
 // changelogs that mark version sections with plain unmarked lines.
-func findHeading(lines []string, version string, lax bool) int {
-	if version == "" {
+func findHeading(lines []string, v string, lax bool) int {
+	if v == "" {
 		return -1
 	}
 	for i, line := range lines {
 		isATX := strings.TrimLeft(line, "#") != line
 		isSetext := strings.TrimSpace(line) != "" && i+1 < len(lines) && isSetextUnderline(lines[i+1])
 		isHeading := isATX || isSetext || (lax && strings.TrimSpace(line) != "")
-		if isHeading && containsVersion(line, version) {
+		if isHeading && version.InLine(line, v) {
 			return i
 		}
 	}
@@ -80,36 +82,4 @@ func isSetextUnderline(line string) bool {
 	}
 	c := trimmed[0]
 	return (c == '=' || c == '-') && strings.Trim(trimmed, string(c)) == ""
-}
-
-// containsVersion reports whether line contains version as a standalone
-// token, not merely as a substring of a longer version number (e.g. "3.1"
-// inside "3.10.2"). A trailing "." is allowed after the match (e.g. "3.1"
-// inside "3.1.0"), since brew's reported version is sometimes less precise
-// than the version documented in a changelog heading.
-func containsVersion(line, version string) bool {
-	for start := 0; ; {
-		idx := strings.Index(line[start:], version)
-		if idx == -1 {
-			return false
-		}
-		idx += start
-		end := idx + len(version)
-		beforeOK := idx == 0 || !IsVersionChar(line[idx-1])
-		afterOK := end == len(line) || !isDigit(line[end])
-		if beforeOK && afterOK {
-			return true
-		}
-		start = idx + 1
-	}
-}
-
-// IsVersionChar reports whether b can continue a version number, i.e. a
-// digit or '.', for checking that a version match isn't part of a longer one.
-func IsVersionChar(b byte) bool {
-	return isDigit(b) || b == '.'
-}
-
-func isDigit(b byte) bool {
-	return b >= '0' && b <= '9'
 }

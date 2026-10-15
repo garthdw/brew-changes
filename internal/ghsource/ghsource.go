@@ -5,6 +5,7 @@ package ghsource
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/garthdw/brew-changes/internal/changelog"
+	"github.com/garthdw/brew-changes/internal/changelogconfig"
+	"github.com/garthdw/brew-changes/internal/version"
 )
 
 var (
@@ -38,48 +41,70 @@ func buildChangelogFilenames() []string {
 // apiBaseURL is the GitHub REST API base, overridable in tests.
 var apiBaseURL = "https://api.github.com"
 
-// githubURLPattern matches a GitHub owner/repo out of a URL. The repo
-// group is lazy so it stops at the shortest prefix that leaves a valid
-// trailing ".git" and/or "/..." path — this lets repo names contain dots
-// themselves (e.g. "llama.cpp", "socket.io") rather than treating the
-// first dot as the start of a ".git" suffix.
-var githubURLPattern = regexp.MustCompile(`github\.com[:/]([^/]+)/([^/]+?)(\.git)?(/.*)?$`)
+// githubURLPattern matches a github.com (https or ssh) or
+// raw.githubusercontent.com URL, capturing the host, owner, repo, and any
+// path after them. The repo group is lazy so it stops at the shortest
+// prefix that leaves a valid trailing ".git" and/or "/..." path — this lets
+// repo names contain dots themselves (e.g. "llama.cpp", "socket.io") rather
+// than treating the first dot as the start of a ".git" suffix.
+var githubURLPattern = regexp.MustCompile(`(github\.com[:/]|raw\.githubusercontent\.com/)([^/]+)/([^/]+?)(\.git)?(/.*)?$`)
 
-// ResolveRepo extracts "owner" and "repo" from a URL pointing at
-// github.com, trying homepage first and falling back to url. ok is false if
-// neither points at GitHub.
-func ResolveRepo(homepage, url string) (owner, repo string, ok bool) {
-	if owner, repo, ok = repoFromURL(homepage); ok {
-		return owner, repo, true
+// parseGitHubURL splits a GitHub URL into owner, repo, and whatever path
+// follows them. raw reports a raw.githubusercontent.com URL, whose path is
+// "/<ref>/<file>" rather than github.com's "/blob/<ref>/<file>".
+func parseGitHubURL(u string) (owner, repo, rest string, raw, ok bool) {
+	m := githubURLPattern.FindStringSubmatch(u)
+	if m == nil {
+		return "", "", "", false, false
 	}
-	return repoFromURL(url)
+	return m[2], m[3], m[5], strings.HasPrefix(m[1], "raw."), true
 }
 
-// manualReleasesListingPattern matches a bare GitHub releases listing page
-// (as opposed to a specific file, blob, or individual release) — the shape
-// changelogconfig entries use for formulae with a real GitHub repo that
-// Homebrew's homepage/url fields don't reference (see changelog_config.json).
-var manualReleasesListingPattern = regexp.MustCompile(`^https://github\.com/([^/]+)/([^/]+)/releases/?$`)
-
-// ResolveManualReleasesRepo returns the owner/repo if rawURL is exactly a
-// GitHub repo's bare releases listing page. Such URLs should be treated as
-// a known GitHub repo and processed through the Releases API rather than
-// fetched as a raw changelog file — the listing page itself is HTML, not
-// something FetchManualSection can render.
-func ResolveManualReleasesRepo(rawURL string) (owner, repo string, ok bool) {
-	m := manualReleasesListingPattern.FindStringSubmatch(rawURL)
-	if m == nil {
-		return "", "", false
+// resolveRepo extracts owner and repo from whichever of homepage or url
+// points at GitHub, preferring homepage. ok is false if neither does.
+func resolveRepo(homepage, url string) (owner, repo string, ok bool) {
+	for _, u := range []string{homepage, url} {
+		if owner, repo, _, _, ok = parseGitHubURL(u); ok {
+			return owner, repo, true
+		}
 	}
-	return m[1], m[2], true
+	return "", "", false
 }
 
-func repoFromURL(url string) (owner, repo string, ok bool) {
-	m := githubURLPattern.FindStringSubmatch(url)
-	if m == nil {
-		return "", "", false
+// Source is where a package's changelog comes from, and how to read it.
+type Source struct {
+	Owner string // GitHub owner, empty if no repo is known
+	Repo  string // GitHub repo name
+
+	// ManualURL is a manually curated changelog/release-notes link (see
+	// internal/changelogconfig), used instead of any GitHub repo. Empty if
+	// none is configured.
+	ManualURL string
+
+	// LaxHeadings relaxes version-heading matching (see
+	// changelog.TrimToRange) for changelogs that mark version sections with
+	// plain, unmarked lines rather than Markdown headings.
+	LaxHeadings bool
+
+	// PrereleasesOnly keeps only GitHub-flagged pre-releases, for preview
+	// channels (e.g. zed@preview) whose release history is interleaved with
+	// the stable channel's.
+	PrereleasesOnly bool
+}
+
+// ResolveSource determines where the named package's changelog comes from:
+// changelogconfig's curated entry if one names a URL or repo, otherwise a
+// GitHub repo auto-detected from Homebrew's homepage/url metadata.
+func ResolveSource(name, homepage, url string) Source {
+	e := changelogconfig.Get(name)
+	s := Source{ManualURL: e.URL, LaxHeadings: e.LaxHeadings, PrereleasesOnly: e.Prerelease}
+	switch {
+	case e.Repo != "":
+		s.Owner, s.Repo, _ = strings.Cut(e.Repo, "/")
+	case e.URL == "":
+		s.Owner, s.Repo, _ = resolveRepo(homepage, url)
 	}
-	return m[1], m[2], true
+	return s
 }
 
 var (
@@ -162,7 +187,7 @@ type contentsResponse struct {
 // raw.githubusercontent.com request if that fails — the Contents API
 // returns no content for files over 1MB (e.g. aws-cli's CHANGELOG.rst). An
 // empty ref uses the default branch ("HEAD" for the raw fallback).
-func fetchGitHubFile(owner, repo, path, ref string) (content string, ok bool) {
+func fetchGitHubFile(owner, repo, path, ref string) (string, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s", apiBaseURL, owner, repo, path)
 	if ref != "" {
 		apiURL += "?ref=" + ref
@@ -170,7 +195,7 @@ func fetchGitHubFile(owner, repo, path, ref string) (content string, ok bool) {
 	var parsed contentsResponse
 	if err := getJSON(apiURL, &parsed); err == nil {
 		if decoded, derr := base64.StdEncoding.DecodeString(strings.ReplaceAll(parsed.Content, "\n", "")); derr == nil && len(decoded) > 0 {
-			return string(decoded), true
+			return string(decoded), nil
 		}
 	}
 
@@ -178,93 +203,95 @@ func fetchGitHubFile(owner, repo, path, ref string) (content string, ok bool) {
 	if rawRef == "" {
 		rawRef = "HEAD"
 	}
-	rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, rawRef, path)
-	content, ok, _ = FetchRaw(rawURL)
-	return content, ok
+	return fetchRaw(fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, rawRef, path))
 }
-
-var (
-	githubFileURLPattern      = regexp.MustCompile(`^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/(?:blob|raw)/([^/]+)/(.+)$`)
-	rawGithubUsercontentURLRe = regexp.MustCompile(`^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$`)
-)
 
 // parseGitHubFileURL extracts owner/repo/ref/path from a github.com
-// blob/raw URL or a raw.githubusercontent.com URL (two patterns since the
-// hosts don't share a path shape), so the file can be fetched through the
-// authenticated Contents API instead of an anonymous GET.
+// blob/raw URL or a raw.githubusercontent.com URL, so the file can be
+// fetched through the authenticated Contents API instead of an anonymous
+// GET.
 func parseGitHubFileURL(rawURL string) (owner, repo, ref, path string, ok bool) {
-	if m := githubFileURLPattern.FindStringSubmatch(rawURL); m != nil {
-		return m[1], m[2], m[3], m[4], true
+	owner, repo, rest, raw, ok := parseGitHubURL(rawURL)
+	if !ok {
+		return "", "", "", "", false
 	}
-	if m := rawGithubUsercontentURLRe.FindStringSubmatch(rawURL); m != nil {
-		return m[1], m[2], m[3], m[4], true
+	rest = strings.TrimPrefix(rest, "/")
+	if !raw {
+		kind, after, _ := strings.Cut(rest, "/")
+		if kind != "blob" && kind != "raw" {
+			return "", "", "", "", false
+		}
+		rest = after
 	}
-	return "", "", "", "", false
+	ref, path, ok = strings.Cut(rest, "/")
+	if !ok || ref == "" || path == "" {
+		return "", "", "", "", false
+	}
+	return owner, repo, ref, path, true
 }
 
-// rawFetchAttempts bounds retries for FetchRaw's transient-failure retry:
+// rawFetchAttempts bounds retries for fetchRaw's transient-failure retry:
 // raw.githubusercontent.com in particular has been observed to 503
 // intermittently even when the file is perfectly reachable.
 const rawFetchAttempts = 3
 
-// FetchRaw fetches an arbitrary URL as plain text.
-// Only transient failures (network
-// errors, 5xx) are retried — a 404 or HTML response won't change on retry.
-func FetchRaw(rawURL string) (content string, ok bool, contentType string) {
-	for attempt := 0; attempt < rawFetchAttempts; attempt++ {
+// ErrHTML is returned for a changelog URL that serves an HTML page, which
+// can't be rendered as a plain-text/Markdown changelog.
+var ErrHTML = errors.New("changelog is an HTML page")
+
+// fetchRaw fetches an arbitrary URL as plain text. Only transient failures
+// (network errors, 5xx) are retried — a 404 or HTML response won't change
+// on retry.
+func fetchRaw(rawURL string) (content string, err error) {
+	for attempt := range rawFetchAttempts {
 		if attempt > 0 {
 			time.Sleep(300 * time.Millisecond)
 		}
 		var retryable bool
-		content, ok, contentType, retryable = fetchRawOnce(rawURL)
-		if ok || !retryable {
-			return content, ok, contentType
+		if content, retryable, err = fetchRawOnce(rawURL); err == nil || !retryable {
+			break
 		}
 	}
-	return "", false, ""
+	return content, err
 }
 
-func fetchRawOnce(rawURL string) (content string, ok bool, contentType string, retryable bool) {
+func fetchRawOnce(rawURL string) (content string, retryable bool, err error) {
 	resp, err := httpClient.Get(rawURL)
 	if err != nil {
-		return "", false, "", true
+		return "", true, err
 	}
 	defer resp.Body.Close()
-	contentType = resp.Header.Get("Content-Type")
 	if resp.StatusCode != http.StatusOK {
-		return "", false, contentType, resp.StatusCode >= 500
+		return "", resp.StatusCode >= 500, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
 	}
-	if strings.Contains(contentType, "html") {
-		return "", false, contentType, false
+	if strings.Contains(resp.Header.Get("Content-Type"), "html") {
+		return "", false, ErrHTML
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", false, contentType, true
+		return "", true, err
 	}
-	return string(body), true, contentType, false
+	return string(body), false, nil
 }
 
 // FetchManualSection fetches a manually-configured changelog URL (see
-// changelogconfig) and trims it to the section documenting newVersion.
-// fetched is false if the URL itself couldn't be retrieved, or its content
-// is HTML rather than plain text/Markdown — either
-// way there's no content to render. section is still populated (with a
-// fallback excerpt) even when found is false, i.e. the file was fetched but
-// doesn't document newVersion under a recognized heading.
-func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (section string, fetched bool, found bool, contentType string) {
+// changelogconfig) and trims it to the section documenting newVersion. err
+// is set if the URL couldn't be retrieved (ErrHTML if it's an HTML page
+// rather than plain text/Markdown). found is false if the content doesn't
+// document newVersion under a recognized heading, in which case section
+// holds a fallback excerpt.
+func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (section string, found bool, err error) {
 	var content string
-	var ok bool
 	if owner, repo, ref, path, isGitHub := parseGitHubFileURL(rawURL); isGitHub {
-		content, ok = fetchGitHubFile(owner, repo, path, ref)
-		contentType = "text/Markdown"
+		content, err = fetchGitHubFile(owner, repo, path, ref)
 	} else {
-		content, ok, contentType = FetchRaw(rawURL)
+		content, err = fetchRaw(rawURL)
 	}
-	if !ok {
-		return "", false, false, contentType
+	if err != nil {
+		return "", false, err
 	}
 	section, found = changelog.TrimToRange(content, newVersion, installedVersion, lax)
-	return section, true, found, contentType
+	return section, found, nil
 }
 
 // FetchChangelogSection fetches filename's content and trims it to the
@@ -276,8 +303,8 @@ func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (
 // lax relaxes version-heading matching for formulae recorded as needing it
 // in changelogconfig (see changelog.TrimToRange).
 func FetchChangelogSection(owner, repo, filename, newVersion, installedVersion string, lax bool) (section string, ok bool) {
-	content, ok := fetchGitHubFile(owner, repo, filename, "")
-	if !ok {
+	content, err := fetchGitHubFile(owner, repo, filename, "")
+	if err != nil {
 		return "", false
 	}
 	return changelog.TrimToRange(content, newVersion, installedVersion, lax)
@@ -379,20 +406,18 @@ func lastCommitDate(owner, repo, filename string) time.Time {
 // is also true if no changelog file was found, or its listing couldn't be
 // fetched.
 func ResolveChangelogSource(owner, repo string) (filename string, useReleases bool) {
-	name, fileDate, found, err := resolveChangelogFilename(owner, repo)
-	if err != nil || !found {
-		return "", true
-	}
+	// Fetched alongside the listing rather than after it, since it's needed
+	// whenever a changelog file turns out to exist.
+	releaseDateCh := make(chan time.Time, 1)
+	go func() { releaseDateCh <- latestReleaseDate(owner, repo) }()
 
-	var releaseDate time.Time
-	var wg sync.WaitGroup
-	wg.Go(func() { releaseDate = latestReleaseDate(owner, repo) })
-	if fileDate.IsZero() {
+	name, fileDate, found, err := resolveChangelogFilename(owner, repo)
+	if err == nil && found && fileDate.IsZero() {
 		fileDate = lastCommitDate(owner, repo, name)
 	}
-	wg.Wait()
+	releaseDate := <-releaseDateCh
 
-	if !releaseDate.IsZero() && releaseDate.After(fileDate) {
+	if err != nil || !found || (!releaseDate.IsZero() && releaseDate.After(fileDate)) {
 		return "", true
 	}
 	return name, false
@@ -423,78 +448,6 @@ type Release struct {
 
 const maxReleasePages = 3
 
-// TagMatchesVersion reports whether a release tag identifies the given
-// plain version string (e.g. Homebrew's "1.8.1"), regardless of whatever
-// prefix the upstream project puts on its tags: "v1.8.1", "jq-1.8.1", and
-// even "2024-edition-v1.8.1" all match "1.8.1". A trailing "-pre" (as used
-// by preview/nightly channels, e.g. zed@preview's "v1.20.0-pre") is
-// stripped before matching, so those tags can also serve as the walk's
-// installed/target boundary.
-//
-// A tag matches if it ends with the version and the character immediately
-// before that suffix is neither a digit nor '.'. That boundary check is
-// what makes this safe where a naive "strip everything before the first
-// digit" isn't: without it, version "2.3" would wrongly match tag "1.2.3"
-// (the tail of a different, longer version number) since '.' would be
-// mistaken for a valid prefix separator.
-func TagMatchesVersion(tag, version string) bool {
-	if version == "" {
-		return false
-	}
-	tag = strings.TrimSuffix(tag, "-pre")
-	if exactSuffixMatch(tag, version) {
-		return true
-	}
-	return trailingComponentsMatch(tag, version)
-}
-
-func exactSuffixMatch(tag, version string) bool {
-	if !strings.HasSuffix(tag, version) {
-		return false
-	}
-	if len(tag) == len(version) {
-		return true
-	}
-	return !changelog.IsVersionChar(tag[len(tag)-len(version)-1])
-}
-
-var trailingVersionPattern = regexp.MustCompile(`[0-9]+(\.[0-9]+)*$`)
-
-// trailingComponentsMatch compares tag's trailing dot-separated numeric run
-// against version component-by-component, ignoring leading zeros in each
-// component. This catches cases like yt-dlp, whose calendar-style versions
-// are zero-padded in its GitHub tags ("2026.07.04") but not in Homebrew's
-// reported version ("2026.7.4"), which exactSuffixMatch can't see past.
-func trailingComponentsMatch(tag, version string) bool {
-	loc := trailingVersionPattern.FindStringIndex(tag)
-	if loc == nil {
-		return false
-	}
-	if loc[0] > 0 && changelog.IsVersionChar(tag[loc[0]-1]) {
-		return false
-	}
-
-	tagParts := strings.Split(tag[loc[0]:], ".")
-	versionParts := strings.Split(version, ".")
-	if len(tagParts) != len(versionParts) {
-		return false
-	}
-	for i := range tagParts {
-		if normalizeVersionComponent(tagParts[i]) != normalizeVersionComponent(versionParts[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func normalizeVersionComponent(s string) string {
-	s = strings.TrimLeft(s, "0")
-	if s == "" {
-		return "0"
-	}
-	return s
-}
-
 // FetchReleases returns releases newer than installedVersion, newest first,
 // stopping at the release matching installedVersion and otherwise capping
 // out at 20. If targetVersion is non-empty, the single page of up to 100
@@ -507,7 +460,7 @@ func normalizeVersionComponent(s string) string {
 // all — they just tag commits directly. When the Releases API comes back
 // completely empty (as opposed to "no releases newer than installed"),
 // FetchReleases falls back to the plain git tags API, which GitHub returns
-// newest-first the same way and which TagMatchesVersion can filter
+// newest-first the same way and which version.MatchesTag can filter
 // identically. The fallback only has tag names to work with, so the
 // resulting Releases have empty PublishedAt/Body.
 func FetchReleases(owner, repo, installedVersion, targetVersion string) ([]Release, error) {
@@ -534,13 +487,13 @@ func appendLatestIfMissing(owner, repo string, filtered []Release, targetVersion
 		return filtered
 	}
 	for _, r := range filtered {
-		if TagMatchesVersion(r.TagName, targetVersion) {
+		if version.MatchesTag(r.TagName, targetVersion) {
 			return filtered
 		}
 	}
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBaseURL, owner, repo)
 	var latest Release
-	if err := getJSON(url, &latest); err != nil || !TagMatchesVersion(latest.TagName, targetVersion) {
+	if err := getJSON(url, &latest); err != nil || !version.MatchesTag(latest.TagName, targetVersion) {
 		return filtered
 	}
 	return append(filtered, latest)
@@ -559,11 +512,11 @@ func appendLatestIfMissing(owner, repo string, filtered []Release, targetVersion
 // older-but-still-unreleased versions between it and installedVersion (e.g.
 // an upgrade that skipped a release).
 func accumulateRelease(filtered []Release, r Release, installedVersion, targetVersion string) ([]Release, bool) {
-	if TagMatchesVersion(r.TagName, installedVersion) {
+	if version.MatchesTag(r.TagName, installedVersion) {
 		return filtered, true
 	}
 	filtered = append(filtered, r)
-	if installedVersion == "" && TagMatchesVersion(r.TagName, targetVersion) {
+	if installedVersion == "" && version.MatchesTag(r.TagName, targetVersion) {
 		return filtered, true
 	}
 	if targetVersion == "" && len(filtered) >= 20 {

@@ -7,7 +7,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/garthdw/brew-changes/internal/changelogconfig"
 	"github.com/garthdw/brew-changes/internal/ghsource"
 	"github.com/garthdw/brew-changes/internal/homebrew"
 	"github.com/garthdw/brew-changes/internal/ui"
@@ -57,30 +56,13 @@ func run() error {
 		}
 
 		info := infos[pkg.Name]
-		manualChangelogURL, hasManualOverride := changelogconfig.Lookup(pkg.Name)
-
-		var owner, repo string
-		if !hasManualOverride {
-			owner, repo, _ = ghsource.ResolveRepo(info.Homepage, info.URL)
-		} else if relOwner, relRepo, ok := ghsource.ResolveManualReleasesRepo(manualChangelogURL); ok {
-			// The override is just a bare GitHub releases listing page
-			// (e.g. gemini-cli, pnpm, zed) — use the normal GitHub
-			// Releases API path instead of fetching that HTML page as if
-			// it were a raw changelog file.
-			owner, repo = relOwner, relRepo
-			manualChangelogURL = ""
-		}
-
 		items = append(items, ui.Item{
-			Name:               pkg.Name,
-			Kind:               kind,
-			Installed:          pkg.Installed,
-			Current:            pkg.Current,
-			Homepage:           info.Homepage,
-			Owner:              owner,
-			Repo:               repo,
-			ManualChangelogURL: manualChangelogURL,
-			LaxHeadings:        changelogconfig.LaxHeadings(pkg.Name),
+			Name:      pkg.Name,
+			Kind:      kind,
+			Installed: pkg.Installed,
+			Current:   pkg.Current,
+			Homepage:  info.Homepage,
+			Source:    ghsource.ResolveSource(pkg.Name, info.Homepage, info.URL),
 		})
 	}
 

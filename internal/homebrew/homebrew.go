@@ -36,33 +36,18 @@ type outdatedResult struct {
 
 // Outdated returns every outdated formula and cask.
 func Outdated() ([]Package, error) {
-	var formulae, casks []Package
-	var formulaErr, caskErr error
-	var wg sync.WaitGroup
-	wg.Go(func() { formulae, formulaErr = outdated(false) })
-	wg.Go(func() { casks, caskErr = outdated(true) })
-	wg.Wait()
-
-	if err := cmp.Or(formulaErr, caskErr); err != nil {
-		return nil, err
-	}
-	return append(formulae, casks...), nil
-}
-
-func outdated(isCask bool) ([]Package, error) {
-	flag := kindFlag(isCask)
-	out, err := exec.Command("brew", "outdated", "--json=v2", flag).Output()
+	out, err := exec.Command("brew", "outdated", "--json=v2").Output()
 	if err != nil {
-		return nil, fmt.Errorf("brew outdated %s: %w", flag, err)
+		return nil, fmt.Errorf("brew outdated: %w", err)
 	}
 	var result outdatedResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("parsing brew outdated %s output: %w", flag, err)
+		return nil, fmt.Errorf("parsing brew outdated output: %w", err)
 	}
-	entries := result.Formulae
-	if isCask {
-		entries = result.Casks
-	}
+	return append(toPackages(result.Formulae, false), toPackages(result.Casks, true)...), nil
+}
+
+func toPackages(entries []outdatedEntry, isCask bool) []Package {
 	packages := make([]Package, 0, len(entries))
 	for _, e := range entries {
 		packages = append(packages, Package{
@@ -72,7 +57,7 @@ func outdated(isCask bool) ([]Package, error) {
 			IsCask:    isCask,
 		})
 	}
-	return packages, nil
+	return packages
 }
 
 func kindFlag(isCask bool) string {
@@ -90,7 +75,6 @@ func firstOrEmpty(versions []string) string {
 }
 
 type formulaInfo struct {
-	Name     string `json:"name"`
 	FullName string `json:"full_name"`
 	Homepage string `json:"homepage"`
 	Versions struct {
@@ -107,7 +91,6 @@ type formulaInfo struct {
 }
 
 type caskInfo struct {
-	Token     string `json:"token"`
 	FullToken string `json:"full_token"`
 	Homepage  string `json:"homepage"`
 	Version   string `json:"version"`
