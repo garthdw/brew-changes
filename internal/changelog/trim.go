@@ -38,9 +38,10 @@ func TrimToRange(content, newVersion, installedVersion string, lax bool) (string
 		return result + fmt.Sprintf("\n\n... (couldn't locate version headings, showing first %d lines)", MaxContentLines), false
 	}
 
-	endLine := findHeading(lines, installedVersion, lax)
-	if endLine != -1 && endLine > startLine {
-		return strings.Join(lines[startLine:endLine], "\n"), true
+	// Search only past startLine, since the new-version heading can itself
+	// mention the installed version (auto-changelog's compare links).
+	if endLine := findHeading(lines[startLine+1:], installedVersion, lax); endLine != -1 {
+		return strings.Join(lines[startLine:startLine+1+endLine], "\n"), true
 	}
 
 	end := startLine + MaxContentLines

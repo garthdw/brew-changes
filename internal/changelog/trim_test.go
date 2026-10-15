@@ -207,3 +207,28 @@ func TestTrimToRange_TrailingZeroRetryDoesNotMatchLongerVersion(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// auto-changelog (used by ast-grep) links each heading to a compare URL
+// naming the previous version, so the new-version heading also mentions
+// the installed version.
+func TestTrimToRange_NewHeadingMentionsInstalledVersion(t *testing.T) {
+	content := strings.Join([]string{
+		"#### [0.51.0](https://github.com/ast-grep/ast-grep/compare/0.50.0...0.51.0)",
+		"- new",
+		"#### [0.50.0](https://github.com/ast-grep/ast-grep/compare/0.45.3...0.50.0)",
+		"- old",
+	}, "\n")
+
+	got, found := TrimToRange(content, "0.51.0", "0.50.0", false)
+	want := strings.Join([]string{
+		"#### [0.51.0](https://github.com/ast-grep/ast-grep/compare/0.50.0...0.51.0)",
+		"- new",
+	}, "\n")
+
+	if !found {
+		t.Error("expected found = true")
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
