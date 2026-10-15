@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"sync"
 
 	"github.com/garthdw/brew-changes/internal/ghsource"
 	"github.com/garthdw/brew-changes/internal/homebrew"
@@ -31,31 +30,15 @@ func run() error {
 		return nil
 	}
 
-	var outdatedFormulae, outdatedCasks []string
-	for _, pkg := range packages {
-		if pkg.IsCask {
-			outdatedCasks = append(outdatedCasks, pkg.Name)
-		} else {
-			outdatedFormulae = append(outdatedFormulae, pkg.Name)
-		}
-	}
-	// Errors leave the map nil, which reads as "no info" for every package.
-	var formulaInfos, caskInfos map[string]homebrew.Info
-	var wg sync.WaitGroup
-	wg.Go(func() { formulaInfos, _ = homebrew.ResolveInfoBatch(outdatedFormulae, false) })
-	wg.Go(func() { caskInfos, _ = homebrew.ResolveInfoBatch(outdatedCasks, true) })
-	wg.Wait()
-
+	infos := homebrew.ResolveInfo(packages)
 	items := make([]ui.Item, 0, len(packages))
-	for _, pkg := range packages {
+	for i, pkg := range packages {
 		kind := "formula"
-		infos := formulaInfos
 		if pkg.IsCask {
 			kind = "cask"
-			infos = caskInfos
 		}
 
-		info := infos[pkg.Name]
+		info := infos[i]
 		items = append(items, ui.Item{
 			Name:      pkg.Name,
 			Kind:      kind,

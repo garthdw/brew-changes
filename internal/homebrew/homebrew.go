@@ -170,6 +170,36 @@ func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
 	return infos, nil
 }
 
+// ResolveInfo returns each package's Info, aligned with packages, resolving
+// formulae and casks concurrently. Packages brew can't resolve get a zero
+// Info.
+func ResolveInfo(packages []Package) []Info {
+	var formulae, casks []string
+	for _, p := range packages {
+		if p.IsCask {
+			casks = append(casks, p.Name)
+		} else {
+			formulae = append(formulae, p.Name)
+		}
+	}
+	// Errors leave the map nil, which reads as "no info" for every package.
+	var formulaInfos, caskInfos map[string]Info
+	var wg sync.WaitGroup
+	wg.Go(func() { formulaInfos, _ = ResolveInfoBatch(formulae, false) })
+	wg.Go(func() { caskInfos, _ = ResolveInfoBatch(casks, true) })
+	wg.Wait()
+
+	infos := make([]Info, len(packages))
+	for i, p := range packages {
+		if p.IsCask {
+			infos[i] = caskInfos[p.Name]
+		} else {
+			infos[i] = formulaInfos[p.Name]
+		}
+	}
+	return infos
+}
+
 // resolveChunk runs a single `brew info` call for chunk. If brew itself
 // can't be run, or its output can't be parsed, that error is returned
 // as-is. If brew runs but exits nonzero (some name in chunk didn't

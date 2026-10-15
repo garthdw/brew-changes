@@ -6,7 +6,9 @@
 // real-world repos.
 //
 // Usage: go run ./cmd/validate-changelogs [-cask] [N]
-// N defaults to 50.
+// N defaults to 50. With -outdated, it instead validates this machine's
+// outdated packages through the same path as brew-changes, including
+// trimming to the installed version.
 package main
 
 import (
@@ -26,7 +28,6 @@ import (
 
 	"github.com/garthdw/brew-changes/internal/ghsource"
 	"github.com/garthdw/brew-changes/internal/homebrew"
-	"github.com/garthdw/brew-changes/internal/version"
 )
 
 type analyticsResponse struct {
@@ -49,6 +50,7 @@ type result struct {
 
 func main() {
 	isCask := flag.Bool("cask", false, "validate the most-installed casks instead of formulae")
+	outdated := flag.Bool("outdated", false, "validate this machine's outdated packages, from their installed versions")
 	flag.Parse()
 	n := 50
 	if v, err := strconv.Atoi(flag.Arg(0)); err == nil {
@@ -58,33 +60,34 @@ func main() {
 		flag.CommandLine.Parse(flag.Args()[1:])
 	}
 
-	names, err := topPackages(n, *isCask)
+	var packages []homebrew.Package
+	var results []result
+	var err error
+	if *outdated {
+		packages, err = homebrew.Outdated()
+	} else {
+		packages, results, err = topPackages(n, *isCask)
+	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fetching analytics:", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	resolvable, skipped, err := filterUntapped(names)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "listing taps:", err)
-		os.Exit(1)
-	}
-
-	infos, err := homebrew.ResolveInfoBatch(resolvable, *isCask)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "brew info:", err)
-		os.Exit(1)
-	}
-
-	results := slices.Grow(skipped, len(infos))
+	infos := homebrew.ResolveInfo(packages)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
-	for name, info := range infos {
+	for i, pkg := range packages {
+		if infos[i] == (homebrew.Info{}) {
+			continue // brew couldn't resolve it
+		}
+		// Top-N packages aren't installed, so they're checked at brew's
+		// current version with no installed version to trim back to.
+		pkg.Current = cmp.Or(pkg.Current, infos[i].Version)
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			r := validate(name, info)
+			r := validate(pkg, infos[i])
 			mu.Lock()
 			results = append(results, r)
 			mu.Unlock()
@@ -121,7 +124,9 @@ func main() {
 		matched, total, ok, matched, manual, partial, fail, skip)
 }
 
-func topPackages(n int, isCask bool) ([]string, error) {
+// topPackages returns Homebrew's n most-installed formulae (or casks), with
+// those needing an uninstalled tap split out as skipped results.
+func topPackages(n int, isCask bool) ([]homebrew.Package, []result, error) {
 	url := "https://formulae.brew.sh/api/analytics/install-on-request/365d.json"
 	if isCask {
 		url = "https://formulae.brew.sh/api/analytics/cask-install/365d.json"
@@ -129,18 +134,27 @@ func topPackages(n int, isCask bool) ([]string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("fetching analytics: %w", err)
 	}
 	defer resp.Body.Close()
 	var parsed analyticsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("fetching analytics: %w", err)
 	}
 	names := make([]string, min(n, len(parsed.Items)))
 	for i := range names {
 		names[i] = cmp.Or(parsed.Items[i].Formula, parsed.Items[i].Cask)
 	}
-	return names, nil
+
+	resolvable, skipped, err := filterUntapped(names)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing taps: %w", err)
+	}
+	packages := make([]homebrew.Package, len(resolvable))
+	for i, name := range resolvable {
+		packages[i] = homebrew.Package{Name: name, IsCask: isCask}
+	}
+	return packages, skipped, nil
 }
 
 // filterUntapped splits names into those `brew info` can resolve locally
@@ -180,10 +194,10 @@ func filterUntapped(names []string) (resolvable []string, skipped []result, err 
 // validate runs the same ghsource.Source.Fetch as the TUI and classifies
 // the outcome. ErrHTML (an HTML page that doesn't document the version)
 // counts as a failure, since the TUI can only show it as a link.
-func validate(name string, info homebrew.Info) result {
-	src := ghsource.ResolveSource(name, info.Version, info.Homepage, info.URL)
-	r := result{name: name, owner: src.Owner, repo: src.Repo}
-	c := src.Fetch("", info.Version, nil)
+func validate(pkg homebrew.Package, info homebrew.Info) result {
+	src := ghsource.ResolveSource(pkg.Name, pkg.Current, info.Homepage, info.URL)
+	r := result{name: pkg.Name, owner: src.Owner, repo: src.Repo}
+	c := src.Fetch(pkg.Installed, pkg.Current, nil)
 	r.found = c.Found
 	switch c.Origin {
 	case ghsource.FromNone:
@@ -206,16 +220,16 @@ func validate(name string, info homebrew.Info) result {
 		r.note = fmt.Sprintf("%d bytes", len(c.Section))
 	case ghsource.FromReleases:
 		r.source = "releases"
-		switch i := slices.IndexFunc(c.Releases, func(rel ghsource.Release) bool { return version.MatchesTag(rel.TagName, info.Version) }); {
+		switch {
 		case c.Err != nil:
 			r.note = "fetch error: " + c.Err.Error()
 		case len(c.Releases) == 0:
 			r.note = "no releases found"
-		case i != -1:
-			r.note = "matched tag=" + c.Releases[i].TagName
+		case c.Found:
+			r.note = fmt.Sprintf("%d releases, %s..%s", len(c.Releases), c.Releases[len(c.Releases)-1].TagName, c.Releases[0].TagName)
 		default:
 			r.partial = true
-			r.note = fmt.Sprintf("tag for %s not found; showing %d most recent releases (latest=%s)", info.Version, len(c.Releases), c.Releases[0].TagName)
+			r.note = fmt.Sprintf("tag for %s not found; showing %d most recent releases (latest=%s)", pkg.Current, len(c.Releases), c.Releases[0].TagName)
 		}
 		if c.Filename != "" {
 			r.note = "fell back from " + c.Filename + "; " + r.note
