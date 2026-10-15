@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -52,12 +53,26 @@ func toPackages(entries []outdatedEntry, isCask bool) []Package {
 	for _, e := range entries {
 		packages = append(packages, Package{
 			Name:      e.Name,
-			Installed: firstOrEmpty(e.InstalledVersions),
-			Current:   e.CurrentVersion,
+			Installed: upstreamVersion(firstOrEmpty(e.InstalledVersions), isCask),
+			Current:   upstreamVersion(e.CurrentVersion, isCask),
 			IsCask:    isCask,
 		})
 	}
 	return packages
+}
+
+var revisionSuffix = regexp.MustCompile(`_[0-9]+$`)
+
+// upstreamVersion drops what brew appends to a version that upstream tags,
+// changelog headings and URLs never include: a formula's "_N" revision
+// ("2.51.0_1") or a cask's ",build" suffix (docker-desktop's
+// "4.95.0,242831").
+func upstreamVersion(v string, isCask bool) string {
+	if isCask {
+		v, _, _ = strings.Cut(v, ",")
+		return v
+	}
+	return revisionSuffix.ReplaceAllString(v, "")
 }
 
 func kindFlag(isCask bool) string {
@@ -195,7 +210,7 @@ func fetchInfo(names []string, isCask bool) (map[string]Info, error) {
 
 	infos := make(map[string]Info, len(names))
 	for _, c := range result.Casks {
-		infos[c.FullToken] = Info{Homepage: c.Homepage, URL: c.URL, Version: c.Version}
+		infos[c.FullToken] = Info{Homepage: c.Homepage, URL: c.URL, Version: upstreamVersion(c.Version, true)}
 	}
 	for _, f := range result.Formulae {
 		infos[f.FullName] = Info{Homepage: f.Homepage, URL: cmp.Or(f.URLs.Stable.URL, f.URLs.Head.URL), Version: f.Versions.Stable}

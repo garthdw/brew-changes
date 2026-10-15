@@ -103,3 +103,21 @@ func TestCaskInfo_Unmarshal(t *testing.T) {
 		t.Errorf("got %+v", c)
 	}
 }
+
+func TestUpstreamVersion(t *testing.T) {
+	tests := []struct {
+		v      string
+		isCask bool
+		want   string
+	}{
+		{"4.95.0,242831", true, "4.95.0"},
+		{"latest", true, "latest"},
+		{"2.51.0_1", false, "2.51.0"},
+		{"1.2.3", false, "1.2.3"},
+	}
+	for _, tt := range tests {
+		if got := upstreamVersion(tt.v, tt.isCask); got != tt.want {
+			t.Errorf("upstreamVersion(%q, %v) = %q, want %q", tt.v, tt.isCask, got, tt.want)
+		}
+	}
+}
