@@ -42,3 +42,27 @@ func TestInLine(t *testing.T) {
 		}
 	}
 }
+
+func TestLineMatchers(t *testing.T) {
+	tests := []struct {
+		v, line string
+		want    []bool // one result per matcher
+	}{
+		{"16.2.0", "## GCC 16.2", []bool{false, true}},
+		{"16.2.0", "## GCC 16.2.1", []bool{false, false}},
+		{"16.2.0", "## 16.2.0", []bool{true, false}},
+		{"1.0", "## 1 big release", []bool{false}},
+		{"1.2.3", "## 1.2.3", []bool{true}},
+	}
+	for _, tt := range tests {
+		matchers := LineMatchers(tt.v)
+		if len(matchers) != len(tt.want) {
+			t.Fatalf("LineMatchers(%q) has %d matchers, want %d", tt.v, len(matchers), len(tt.want))
+		}
+		for i, match := range matchers {
+			if got := match(tt.line); got != tt.want[i] {
+				t.Errorf("LineMatchers(%q)[%d](%q) = %v, want %v", tt.v, i, tt.line, got, tt.want[i])
+			}
+		}
+	}
+}

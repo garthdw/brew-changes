@@ -174,3 +174,36 @@ func TestTrimToRange_LaxBetweenUnmarkedHeadings(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+func TestTrimToRange_TrailingZeroOmittedInHeadings(t *testing.T) {
+	content := "## GCC 16.2\nfixes\n## GCC 16.1\nolder\n"
+
+	got, found := TrimToRange(content, "16.2.0", "16.1.0", false)
+	if !found {
+		t.Fatal("expected found = true")
+	}
+	if want := "## GCC 16.2\nfixes"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFindHeading_TwoPartVersionNotShortenedToMajor(t *testing.T) {
+	if got := findHeading([]string{"## 1 big release", "## 1.0"}, "1.0", false); got != 1 {
+		t.Errorf("got %d, want 1", got)
+	}
+	if got := findHeading([]string{"## 1 big release"}, "1.0", false); got != -1 {
+		t.Errorf("got %d, want -1", got)
+	}
+}
+
+func TestTrimToRange_TrailingZeroRetryDoesNotMatchLongerVersion(t *testing.T) {
+	content := "## 2.6.0\nnewest\n## 2.5.1\npatch\n## 2.5\nolder\n"
+
+	got, found := TrimToRange(content, "2.6.0", "2.5.0", false)
+	if !found {
+		t.Fatal("expected found = true")
+	}
+	if want := "## 2.6.0\nnewest\n## 2.5.1\npatch"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

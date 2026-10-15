@@ -14,6 +14,12 @@ import (
 // brew's reported version is sometimes less precise than the version
 // documented in a changelog heading.
 func InLine(line, v string) bool {
+	return inLine(line, v, true)
+}
+
+// inLine is InLine, optionally rejecting a match that continues as a longer
+// version ("2.5" inside "2.5.1").
+func inLine(line, v string, allowLonger bool) bool {
 	for start := 0; ; {
 		idx := strings.Index(line[start:], v)
 		if idx == -1 {
@@ -23,11 +29,27 @@ func InLine(line, v string) bool {
 		end := idx + len(v)
 		beforeOK := idx == 0 || !isVersionChar(line[idx-1])
 		afterOK := end == len(line) || !isDigit(line[end])
+		if !allowLonger && end+1 < len(line) && line[end] == '.' && isDigit(line[end+1]) {
+			afterOK = false
+		}
 		if beforeOK && afterOK {
 			return true
 		}
 		start = idx + 1
 	}
+}
+
+// LineMatchers returns predicates reporting whether a line mentions v, to
+// be tried in order: InLine, then, for a three-plus-part version ending in
+// ".0", v without that suffix, since some projects drop it (gcc's "GCC
+// 16.2", git's "Git v2.56") while Homebrew reports "16.2.0". The shortened
+// form must match exactly, so "2.5" (for "2.5.0") doesn't match "2.5.1".
+func LineMatchers(v string) []func(line string) bool {
+	matchers := []func(string) bool{func(line string) bool { return InLine(line, v) }}
+	if short, ok := strings.CutSuffix(v, ".0"); ok && strings.Contains(short, ".") {
+		matchers = append(matchers, func(line string) bool { return inLine(line, short, false) })
+	}
+	return matchers
 }
 
 // MatchesTag reports whether a release tag identifies v, regardless of

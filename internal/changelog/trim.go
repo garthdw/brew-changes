@@ -56,17 +56,20 @@ func TrimToRange(content, newVersion, installedVersion string, lax bool) (string
 // underlined with `===`/`---`) markdown headings are recognized, since
 // some changelogs (e.g. fzf, ripgrep) use the latter exclusively. When lax
 // is true, any non-blank line counts as a heading candidate, for
-// changelogs that mark version sections with plain unmarked lines.
+// changelogs that mark version sections with plain unmarked lines. Each of
+// version.LineMatchers(v) is tried in turn.
 func findHeading(lines []string, v string, lax bool) int {
 	if v == "" {
 		return -1
 	}
-	for i, line := range lines {
-		isATX := strings.TrimLeft(line, "#") != line
-		isSetext := strings.TrimSpace(line) != "" && i+1 < len(lines) && isSetextUnderline(lines[i+1])
-		isHeading := isATX || isSetext || (lax && strings.TrimSpace(line) != "")
-		if isHeading && version.InLine(line, v) {
-			return i
+	for _, matches := range version.LineMatchers(v) {
+		for i, line := range lines {
+			isATX := strings.TrimLeft(line, "#") != line
+			isSetext := strings.TrimSpace(line) != "" && i+1 < len(lines) && isSetextUnderline(lines[i+1])
+			isHeading := isATX || isSetext || (lax && strings.TrimSpace(line) != "")
+			if isHeading && matches(line) {
+				return i
+			}
 		}
 	}
 	return -1
