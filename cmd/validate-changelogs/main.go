@@ -1,10 +1,11 @@
 // Command validate-changelogs is a standalone dev tool, not part of the
 // shipped brew-changes binary (GoReleaser's build only points at
 // ./cmd/brew-changes). It exercises this repo's changelog-resolution and
-// version-matching logic against Homebrew's most-installed formulae, to
-// catch regressions or gaps across a wide variety of real-world repos.
+// version-matching logic against Homebrew's most-installed formulae (or,
+// with -cask, casks), to catch regressions or gaps across a wide variety of
+// real-world repos.
 //
-// Usage: go run ./cmd/validate-changelogs [N]
+// Usage: go run ./cmd/validate-changelogs [-cask] [N]
 // N defaults to 50.
 package main
 
@@ -12,6 +13,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -30,6 +32,7 @@ import (
 type analyticsResponse struct {
 	Items []struct {
 		Formula string `json:"formula"`
+		Cask    string `json:"cask"`
 	} `json:"items"`
 }
 
@@ -45,14 +48,17 @@ type result struct {
 }
 
 func main() {
+	isCask := flag.Bool("cask", false, "validate the most-installed casks instead of formulae")
+	flag.Parse()
 	n := 50
-	if len(os.Args) > 1 {
-		if v, err := strconv.Atoi(os.Args[1]); err == nil {
-			n = v
-		}
+	if v, err := strconv.Atoi(flag.Arg(0)); err == nil {
+		n = v
+		// flag stops at the first positional argument, so also accept
+		// flags after N ("100 -cask").
+		flag.CommandLine.Parse(flag.Args()[1:])
 	}
 
-	names, err := topFormulae(n)
+	names, err := topPackages(n, *isCask)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fetching analytics:", err)
 		os.Exit(1)
@@ -64,7 +70,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	infos, err := homebrew.ResolveInfoBatch(resolvable, false)
+	infos, err := homebrew.ResolveInfoBatch(resolvable, *isCask)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "brew info:", err)
 		os.Exit(1)
@@ -115,9 +121,13 @@ func main() {
 		matched, total, ok, matched, manual, partial, fail, skip)
 }
 
-func topFormulae(n int) ([]string, error) {
+func topPackages(n int, isCask bool) ([]string, error) {
+	url := "https://formulae.brew.sh/api/analytics/install-on-request/365d.json"
+	if isCask {
+		url = "https://formulae.brew.sh/api/analytics/cask-install/365d.json"
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get("https://formulae.brew.sh/api/analytics/install-on-request/365d.json")
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +138,7 @@ func topFormulae(n int) ([]string, error) {
 	}
 	names := make([]string, min(n, len(parsed.Items)))
 	for i := range names {
-		names[i] = parsed.Items[i].Formula
+		names[i] = cmp.Or(parsed.Items[i].Formula, parsed.Items[i].Cask)
 	}
 	return names, nil
 }
@@ -167,72 +177,49 @@ func filterUntapped(names []string) (resolvable []string, skipped []result, err 
 	return resolvable, skipped, nil
 }
 
+// validate runs the same ghsource.Source.Fetch as the TUI and classifies
+// the outcome. ErrHTML (an HTML page that doesn't document the version)
+// counts as a failure, since the TUI can only show it as a link.
 func validate(name string, info homebrew.Info) result {
-	r := result{name: name}
-
-	src := ghsource.ResolveSource(name, info.Homepage, info.URL)
-	owner, repo := src.Owner, src.Repo
-	r.owner, r.repo = owner, repo
-	switch {
-	case src.ManualURL != "":
-		return validateManual(r, src, info.Version)
-	case owner == "":
+	src := ghsource.ResolveSource(name, info.Version, info.Homepage, info.URL)
+	r := result{name: name, owner: src.Owner, repo: src.Repo}
+	c := src.Fetch("", info.Version, nil)
+	r.found = c.Found
+	switch c.Origin {
+	case ghsource.FromNone:
 		r.source = "no-repo"
 		r.note = fmt.Sprintf("homepage=%s url=%s", info.Homepage, info.URL)
-		return r
-	}
-
-	filename, useReleases := ghsource.ResolveChangelogSource(owner, repo)
-	if useReleases {
+	case ghsource.FromManual:
+		r.source, r.manual = "manual", c.Found
+		switch {
+		case errors.Is(c.Err, ghsource.ErrHTML):
+			r.note = "link only (HTML lacks version): " + src.ManualURL
+		case c.Err != nil:
+			r.note = "fetch error: " + c.Err.Error()
+		case !c.Found:
+			r.note = "version heading not located: " + src.ManualURL
+		default:
+			r.note = fmt.Sprintf("%d bytes from %s", len(c.Section), src.ManualURL)
+		}
+	case ghsource.FromFile:
+		r.source = "file:" + c.Filename
+		r.note = fmt.Sprintf("%d bytes", len(c.Section))
+	case ghsource.FromReleases:
 		r.source = "releases"
-		releases, err := ghsource.FetchReleases(owner, repo, "", info.Version)
-		if err != nil {
-			r.note = "fetch error: " + err.Error()
-			return r
-		}
-		if len(releases) == 0 {
+		switch i := slices.IndexFunc(c.Releases, func(rel ghsource.Release) bool { return version.MatchesTag(rel.TagName, info.Version) }); {
+		case c.Err != nil:
+			r.note = "fetch error: " + c.Err.Error()
+		case len(c.Releases) == 0:
 			r.note = "no releases found"
-			return r
+		case i != -1:
+			r.note = "matched tag=" + c.Releases[i].TagName
+		default:
+			r.partial = true
+			r.note = fmt.Sprintf("tag for %s not found; showing %d most recent releases (latest=%s)", info.Version, len(c.Releases), c.Releases[0].TagName)
 		}
-		if last := releases[len(releases)-1]; version.MatchesTag(last.TagName, info.Version) {
-			r.found = true
-			r.note = fmt.Sprintf("matched tag=%s", last.TagName)
-			return r
+		if c.Filename != "" {
+			r.note = "fell back from " + c.Filename + "; " + r.note
 		}
-		r.partial = true
-		r.note = fmt.Sprintf("tag for %s not found; showing %d most recent releases (latest=%s)", info.Version, len(releases), releases[0].TagName)
-		return r
-	}
-
-	r.source = "file:" + filename
-	section, found := ghsource.FetchChangelogSection(owner, repo, filename, info.Version, "", src.LaxHeadings)
-	r.found = found
-	if !found {
-		r.note = "version heading not located"
-	} else {
-		r.note = fmt.Sprintf("%d bytes", len(section))
-	}
-	return r
-}
-
-// validateManual fetches a configured changelog URL the same way the TUI
-// does. HTML pages count as manual matches, since the TUI shows them as a
-// link to open rather than rendering them.
-func validateManual(r result, src ghsource.Source, version string) result {
-	r.source = "manual"
-	section, found, err := ghsource.FetchManualSection(src.ManualURL, version, "", src.LaxHeadings)
-	switch {
-	case errors.Is(err, ghsource.ErrHTML):
-		r.manual = true
-		r.note = "link only (HTML): " + src.ManualURL
-	case err != nil:
-		r.note = "fetch error: " + err.Error()
-	case !found:
-		r.note = "version heading not located: " + src.ManualURL
-	default:
-		r.manual = true
-		r.found = true
-		r.note = fmt.Sprintf("%d bytes from %s", len(section), src.ManualURL)
 	}
 	return r
 }

@@ -7,10 +7,12 @@ require (
 	charm.land/bubbletea/v2 v2.1.0
 	charm.land/glamour/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.6
+	github.com/JohannesKaufmann/html-to-markdown/v2 v2.4.0
 	github.com/garthdw/bubblekit v0.5.0
 )
 
 require (
+	github.com/JohannesKaufmann/dom v0.2.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.27.0 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect

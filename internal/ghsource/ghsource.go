@@ -12,9 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
 
 	"github.com/garthdw/brew-changes/internal/changelog"
 	"github.com/garthdw/brew-changes/internal/changelogconfig"
@@ -46,8 +50,10 @@ var apiBaseURL = "https://api.github.com"
 // path after them. The repo group is lazy so it stops at the shortest
 // prefix that leaves a valid trailing ".git" and/or "/..." path — this lets
 // repo names contain dots themselves (e.g. "llama.cpp", "socket.io") rather
-// than treating the first dot as the start of a ".git" suffix.
-var githubURLPattern = regexp.MustCompile(`(github\.com[:/]|raw\.githubusercontent\.com/)([^/]+)/([^/]+?)(\.git)?(/.*)?$`)
+// than treating the first dot as the start of a ".git" suffix. The host
+// must be exactly github.com (optionally www.), not a subdomain like
+// docs.github.com.
+var githubURLPattern = regexp.MustCompile(`(?:^|//|@|//www\.)(github\.com[:/]|raw\.githubusercontent\.com/)([^/]+)/([^/]+?)(\.git)?(/.*)?$`)
 
 // parseGitHubURL splits a GitHub URL into owner, repo, and whatever path
 // follows them. raw reports a raw.githubusercontent.com URL, whose path is
@@ -95,9 +101,9 @@ type Source struct {
 // ResolveSource determines where the named package's changelog comes from:
 // changelogconfig's curated entry if one names a URL or repo, otherwise a
 // GitHub repo auto-detected from Homebrew's homepage/url metadata.
-func ResolveSource(name, homepage, url string) Source {
+func ResolveSource(name, version, homepage, url string) Source {
 	e := changelogconfig.Get(name)
-	s := Source{ManualURL: e.URL, LaxHeadings: e.LaxHeadings, PrereleasesOnly: e.Prerelease}
+	s := Source{ManualURL: changelogconfig.ExpandURL(e.URL, version), LaxHeadings: e.LaxHeadings, PrereleasesOnly: e.Prerelease}
 	switch {
 	case e.Repo != "":
 		s.Owner, s.Repo, _ = strings.Cut(e.Repo, "/")
@@ -105,6 +111,64 @@ func ResolveSource(name, homepage, url string) Source {
 		s.Owner, s.Repo, _ = resolveRepo(homepage, url)
 	}
 	return s
+}
+
+// Origin says which source a Changelog came from.
+type Origin int
+
+const (
+	FromNone     Origin = iota // no manual URL or GitHub repo is known
+	FromManual                 // Source.ManualURL
+	FromFile                   // a changelog file in the GitHub repo
+	FromReleases               // the repo's GitHub releases (or tags)
+)
+
+// Changelog is the outcome of Source.Fetch.
+type Changelog struct {
+	Origin Origin
+	// Filename is the changelog file found in the repo. It's set even when
+	// that file didn't document the version and releases were used instead.
+	Filename string
+	Section  string    // trimmed changelog section, for FromManual and FromFile
+	Releases []Release // newest first, for FromReleases
+	// Found reports whether Section or Releases document the target version.
+	Found bool
+	Err   error // the manual URL or releases couldn't be fetched (see FetchManualSection)
+}
+
+// Fetch resolves and fetches s's changelog for an upgrade from installed to
+// current: the manual URL if configured, otherwise the repo's changelog
+// file, falling back to its releases when there's no file or it doesn't
+// document current (e.g. a stale file left behind after switching to
+// GitHub Releases). onStage, if non-nil, is called before each
+// network stage after the first with the changelog filename or "releases",
+// so callers can show progress.
+func (s Source) Fetch(installed, current string, onStage func(stage string)) Changelog {
+	if onStage == nil {
+		onStage = func(string) {}
+	}
+	if s.ManualURL != "" {
+		section, found, err := FetchManualSection(s.ManualURL, current, installed, s.LaxHeadings)
+		return Changelog{Origin: FromManual, Section: section, Found: found, Err: err}
+	}
+	if s.Owner == "" {
+		return Changelog{Origin: FromNone}
+	}
+
+	c := Changelog{Origin: FromReleases}
+	if filename, found, _ := resolveChangelogFilename(s.Owner, s.Repo); found {
+		c.Filename = filename
+		onStage(filename)
+		if section, ok := FetchChangelogSection(s.Owner, s.Repo, filename, current, installed, s.LaxHeadings); ok {
+			c.Origin, c.Section, c.Found = FromFile, section, true
+			return c
+		}
+	}
+
+	onStage("releases")
+	c.Releases, c.Err = FetchReleases(s.Owner, s.Repo, installed, current, s.PrereleasesOnly)
+	c.Found = slices.ContainsFunc(c.Releases, func(r Release) bool { return version.MatchesTag(r.TagName, current) })
+	return c
 }
 
 var (
@@ -203,7 +267,8 @@ func fetchGitHubFile(owner, repo, path, ref string) (string, error) {
 	if rawRef == "" {
 		rawRef = "HEAD"
 	}
-	return fetchRaw(fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, rawRef, path))
+	content, _, err := fetchRaw(fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, rawRef, path))
+	return content, err
 }
 
 // parseGitHubFileURL extracts owner/repo/ref/path from a github.com
@@ -235,62 +300,69 @@ func parseGitHubFileURL(rawURL string) (owner, repo, ref, path string, ok bool) 
 // intermittently even when the file is perfectly reachable.
 const rawFetchAttempts = 3
 
-// ErrHTML is returned for a changelog URL that serves an HTML page, which
-// can't be rendered as a plain-text/Markdown changelog.
-var ErrHTML = errors.New("changelog is an HTML page")
+// ErrHTML is returned by FetchManualSection for an HTML page that doesn't
+// document the requested version.
+var ErrHTML = errors.New("changelog is an HTML page that doesn't document this version")
 
-// fetchRaw fetches an arbitrary URL as plain text. Only transient failures
-// (network errors, 5xx) are retried — a 404 or HTML response won't change
-// on retry.
-func fetchRaw(rawURL string) (content string, err error) {
+// fetchRaw fetches an arbitrary URL as text. HTML pages are converted to
+// Markdown, so their <h2>-style headings become ATX headings TrimToRange
+// can match, and isHTML reports that. Only transient failures (network
+// errors, 5xx) are retried — a 404 won't change on retry.
+func fetchRaw(rawURL string) (content string, isHTML bool, err error) {
 	for attempt := range rawFetchAttempts {
 		if attempt > 0 {
 			time.Sleep(300 * time.Millisecond)
 		}
 		var retryable bool
-		if content, retryable, err = fetchRawOnce(rawURL); err == nil || !retryable {
+		if content, isHTML, retryable, err = fetchRawOnce(rawURL); err == nil || !retryable {
 			break
 		}
 	}
-	return content, err
+	return content, isHTML, err
 }
 
-func fetchRawOnce(rawURL string) (content string, retryable bool, err error) {
+func fetchRawOnce(rawURL string) (content string, isHTML, retryable bool, err error) {
 	resp, err := httpClient.Get(rawURL)
 	if err != nil {
-		return "", true, err
+		return "", false, true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", resp.StatusCode >= 500, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
-	}
-	if strings.Contains(resp.Header.Get("Content-Type"), "html") {
-		return "", false, ErrHTML
+		return "", false, resp.StatusCode >= 500, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", true, err
+		return "", false, true, err
 	}
-	return string(body), false, nil
+	if !strings.Contains(resp.Header.Get("Content-Type"), "html") {
+		return string(body), false, false, nil
+	}
+	content, err = htmltomarkdown.ConvertString(string(body), converter.WithDomain(rawURL))
+	return content, true, false, err
 }
 
 // FetchManualSection fetches a manually-configured changelog URL (see
 // changelogconfig) and trims it to the section documenting newVersion. err
-// is set if the URL couldn't be retrieved (ErrHTML if it's an HTML page
-// rather than plain text/Markdown). found is false if the content doesn't
-// document newVersion under a recognized heading, in which case section
-// holds a fallback excerpt.
+// is set if the URL couldn't be retrieved, or is ErrHTML for an HTML page
+// (e.g. Python's or PHP's changelogs) that doesn't document newVersion,
+// since its leading lines would just be site navigation. Otherwise found is
+// false if the content doesn't document newVersion under a recognized
+// heading, in which case section holds a fallback excerpt.
 func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (section string, found bool, err error) {
 	var content string
+	var isHTML bool
 	if owner, repo, ref, path, isGitHub := parseGitHubFileURL(rawURL); isGitHub {
 		content, err = fetchGitHubFile(owner, repo, path, ref)
 	} else {
-		content, err = fetchRaw(rawURL)
+		content, isHTML, err = fetchRaw(rawURL)
 	}
 	if err != nil {
 		return "", false, err
 	}
 	section, found = changelog.TrimToRange(content, newVersion, installedVersion, lax)
+	if isHTML && !found {
+		return "", false, ErrHTML
+	}
 	return section, found, nil
 }
 
@@ -320,15 +392,14 @@ type repoContentEntry struct {
 // avoids probing each candidate filename with its own round trip (which can
 // add seconds of latency on repos where the first few candidates all miss).
 // If more than one candidate exists, the most recently committed one wins
-// (see lastCommitDate), on the theory that it's the one still maintained,
-// and its date is returned so ResolveChangelogSource needn't re-fetch it;
-// otherwise date is the zero value. found is false if none of the
-// candidates exist; err is set only if the listing request itself failed.
-func resolveChangelogFilename(owner, repo string) (filename string, date time.Time, found bool, err error) {
+// (see lastCommitDate), on the theory that it's the one still maintained.
+// found is false if none of the candidates exist; err is set only if the
+// listing request itself failed.
+func resolveChangelogFilename(owner, repo string) (filename string, found bool, err error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/", apiBaseURL, owner, repo)
 	var entries []repoContentEntry
 	if err := getJSON(url, &entries); err != nil {
-		return "", time.Time{}, false, fmt.Errorf("listing contents for %s/%s: %w", owner, repo, err)
+		return "", false, fmt.Errorf("listing contents for %s/%s: %w", owner, repo, err)
 	}
 	present := make(map[string]bool, len(entries))
 	for _, e := range entries {
@@ -345,20 +416,18 @@ func resolveChangelogFilename(owner, repo string) (filename string, date time.Ti
 	}
 	switch len(matches) {
 	case 0:
-		return "", time.Time{}, false, nil
+		return "", false, nil
 	case 1:
-		return matches[0], time.Time{}, true, nil
+		return matches[0], true, nil
 	default:
-		name, d := mostRecentlyCommitted(owner, repo, matches)
-		return name, d, true, nil
+		return mostRecentlyCommitted(owner, repo, matches), true, nil
 	}
 }
 
 // mostRecentlyCommitted returns whichever of the given filenames (assumed
-// to all exist in the repo) has the most recent commit touching it, and
-// that commit's date, fetched concurrently since each lookup is an
-// independent request.
-func mostRecentlyCommitted(owner, repo string, filenames []string) (string, time.Time) {
+// to all exist in the repo) has the most recent commit touching it, fetched
+// concurrently since each lookup is an independent request.
+func mostRecentlyCommitted(owner, repo string, filenames []string) string {
 	dates := make([]time.Time, len(filenames))
 	var wg sync.WaitGroup
 	for i, name := range filenames {
@@ -372,7 +441,7 @@ func mostRecentlyCommitted(owner, repo string, filenames []string) (string, time
 			best = i
 		}
 	}
-	return filenames[best], dates[best]
+	return filenames[best]
 }
 
 type commitEntry struct {
@@ -392,46 +461,6 @@ func lastCommitDate(owner, repo, filename string) time.Time {
 		return time.Time{}
 	}
 	t, err := time.Parse(time.RFC3339, commits[0].Commit.Committer.Date)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
-}
-
-// ResolveChangelogSource decides between a repo's changelog file and its
-// GitHub releases: some repos stop maintaining a CHANGELOG.md (or similar)
-// after switching to GitHub Releases, leaving the stale file in place. If a
-// changelog file exists, its last commit date is compared against the
-// latest release's publish date; releases win if they're newer. useReleases
-// is also true if no changelog file was found, or its listing couldn't be
-// fetched.
-func ResolveChangelogSource(owner, repo string) (filename string, useReleases bool) {
-	// Fetched alongside the listing rather than after it, since it's needed
-	// whenever a changelog file turns out to exist.
-	releaseDateCh := make(chan time.Time, 1)
-	go func() { releaseDateCh <- latestReleaseDate(owner, repo) }()
-
-	name, fileDate, found, err := resolveChangelogFilename(owner, repo)
-	if err == nil && found && fileDate.IsZero() {
-		fileDate = lastCommitDate(owner, repo, name)
-	}
-	releaseDate := <-releaseDateCh
-
-	if err != nil || !found || (!releaseDate.IsZero() && releaseDate.After(fileDate)) {
-		return "", true
-	}
-	return name, false
-}
-
-// latestReleaseDate returns the publish date of the repo's most recent
-// release, or the zero time if it can't be determined.
-func latestReleaseDate(owner, repo string) time.Time {
-	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=1", apiBaseURL, owner, repo)
-	var releases []Release
-	if err := getJSON(url, &releases); err != nil || len(releases) == 0 {
-		return time.Time{}
-	}
-	t, err := time.Parse(time.RFC3339, releases[0].PublishedAt)
 	if err != nil {
 		return time.Time{}
 	}
@@ -463,26 +492,29 @@ const maxReleasePages = 3
 // newest-first the same way and which version.MatchesTag can filter
 // identically. The fallback only has tag names to work with, so the
 // resulting Releases have empty PublishedAt/Body.
-func FetchReleases(owner, repo, installedVersion, targetVersion string) ([]Release, error) {
+func FetchReleases(owner, repo, installedVersion, targetVersion string, prereleasesOnly bool) ([]Release, error) {
 	releasesURL := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", apiBaseURL, owner, repo)
-	filtered, sawAny, err := fetchPages(releasesURL, func(r Release) Release { return r }, installedVersion, targetVersion)
+	filtered, sawAny, err := fetchPages(releasesURL, func(r Release) Release { return r }, installedVersion, targetVersion, prereleasesOnly)
 	if err != nil {
 		return nil, err
 	}
 	if !sawAny {
 		tagsURL := fmt.Sprintf("%s/repos/%s/%s/tags?per_page=100", apiBaseURL, owner, repo)
-		filtered, _, err = fetchPages(tagsURL, func(t tagEntry) Release { return Release{TagName: t.Name} }, installedVersion, targetVersion)
+		filtered, _, err = fetchPages(tagsURL, func(t tagEntry) Release { return Release{TagName: t.Name} }, installedVersion, targetVersion, prereleasesOnly)
 		return filtered, err
 	}
-	return appendLatestIfMissing(owner, repo, filtered, targetVersion), nil
+	return findTargetIfMissing(owner, repo, filtered, targetVersion, prereleasesOnly), nil
 }
 
-// appendLatestIfMissing works around a GitHub API quirk where a release
-// published very recently can be absent from the paginated /releases list
-// (its search index lags behind) even though /releases/latest already
-// reflects it. If targetVersion wasn't found anywhere in filtered, this
-// checks /releases/latest and appends it on a match.
-func appendLatestIfMissing(owner, repo string, filtered []Release, targetVersion string) []Release {
+// findTargetIfMissing handles targetVersion missing from filtered. A just-
+// published release can be absent from the paginated /releases list (its
+// search index lags) though /releases/latest reflects it, so that's checked
+// and appended on a match. Otherwise the target is usually just older than
+// the whole first page (llama.cpp's per-commit builds, gemini-cli's
+// nightlies), making filtered irrelevant, so the target is fetched by its
+// likely tag names and returned alone. For pre-release channels, whose
+// releases /releases/latest never returns, only "-pre" tags are tried.
+func findTargetIfMissing(owner, repo string, filtered []Release, targetVersion string, prereleasesOnly bool) []Release {
 	if targetVersion == "" {
 		return filtered
 	}
@@ -491,12 +523,22 @@ func appendLatestIfMissing(owner, repo string, filtered []Release, targetVersion
 			return filtered
 		}
 	}
-	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBaseURL, owner, repo)
-	var latest Release
-	if err := getJSON(url, &latest); err != nil || !version.MatchesTag(latest.TagName, targetVersion) {
-		return filtered
+	tags := []string{"v" + targetVersion + "-pre", targetVersion + "-pre"}
+	if !prereleasesOnly {
+		url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", apiBaseURL, owner, repo)
+		var latest Release
+		if err := getJSON(url, &latest); err == nil && version.MatchesTag(latest.TagName, targetVersion) {
+			return append(filtered, latest)
+		}
+		tags = []string{"v" + targetVersion, targetVersion}
 	}
-	return append(filtered, latest)
+	for _, tag := range tags {
+		var r Release
+		if err := getJSON(fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s", apiBaseURL, owner, repo, tag), &r); err == nil && (r.Prerelease || !prereleasesOnly) {
+			return []Release{r}
+		}
+	}
+	return filtered
 }
 
 // accumulateRelease appends r to filtered and reports whether the caller
@@ -531,9 +573,10 @@ type tagEntry struct {
 
 // fetchPages walks a newest-first list endpoint (releases, or tags for
 // repos that don't use GitHub Releases), feeding each entry through
-// accumulateRelease. Only the first page is fetched when targetVersion is
-// set. sawAny reports whether the endpoint returned any entries at all.
-func fetchPages[T any](url string, toRelease func(T) Release, installedVersion, targetVersion string) (filtered []Release, sawAny bool, err error) {
+// accumulateRelease, skipping non-pre-releases if prereleasesOnly. Only the
+// first page is fetched when targetVersion is set. sawAny reports whether
+// the endpoint returned any entries at all.
+func fetchPages[T any](url string, toRelease func(T) Release, installedVersion, targetVersion string, prereleasesOnly bool) (filtered []Release, sawAny bool, err error) {
 	pages := maxReleasePages
 	if targetVersion != "" {
 		pages = 1
@@ -546,8 +589,12 @@ func fetchPages[T any](url string, toRelease func(T) Release, installedVersion, 
 		}
 		sawAny = sawAny || len(entries) > 0
 		for _, e := range entries {
+			r := toRelease(e)
+			if prereleasesOnly && !r.Prerelease {
+				continue
+			}
 			var stop bool
-			filtered, stop = accumulateRelease(filtered, toRelease(e), installedVersion, targetVersion)
+			filtered, stop = accumulateRelease(filtered, r, installedVersion, targetVersion)
 			if stop {
 				return filtered, sawAny, nil
 			}

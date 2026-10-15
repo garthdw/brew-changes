@@ -62,7 +62,7 @@ func run() error {
 			Installed: pkg.Installed,
 			Current:   pkg.Current,
 			Homepage:  info.Homepage,
-			Source:    ghsource.ResolveSource(pkg.Name, info.Homepage, info.URL),
+			Source:    ghsource.ResolveSource(pkg.Name, pkg.Current, info.Homepage, info.URL),
 		})
 	}
 

@@ -125,31 +125,45 @@ func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 	}
 }
 
-func TestResolveChangelogCmd_NoRepoWithManualURL(t *testing.T) {
+func TestFetchChangelogCmd_NoRepoWithManualURL(t *testing.T) {
 	it := Item{Name: "rust", Source: ghsource.Source{ManualURL: "https://example.com/rust/RELEASES.md"}}
-	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
+	msg := fetchChangelogCmd(0, it)().(bodyFetchedMsg)
 	if !strings.Contains(msg.body, "https://example.com/rust/RELEASES.md") {
 		t.Errorf("expected body to mention the manual changelog URL, got %q", msg.body)
 	}
 }
 
-func TestResolveChangelogCmd_ManualURLServesHTML(t *testing.T) {
+func TestFetchChangelogCmd_ManualURLServesHTML(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte("<html><body>not a changelog</body></html>"))
 	}))
 	defer srv.Close()
 
-	it := Item{Name: "rust", Source: ghsource.Source{ManualURL: srv.URL}}
-	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
-	if !strings.Contains(msg.body, "HTML page") {
-		t.Errorf("expected body to mention the HTML-specific reason, got %q", msg.body)
+	it := Item{Name: "rust", Current: "1.2.3", Source: ghsource.Source{ManualURL: srv.URL}}
+	msg := fetchChangelogCmd(0, it)().(bodyFetchedMsg)
+	if !strings.Contains(msg.body, "HTML page") || strings.Contains(msg.body, "not a changelog") {
+		t.Errorf("expected only the HTML-specific reason (no page excerpt) when the version isn't found, got %q", msg.body)
 	}
 }
 
-func TestResolveChangelogCmd_NoRepoNoManualURL(t *testing.T) {
+func TestFetchChangelogCmd_ManualURLServesHTMLWithVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte("<html><body><h2>1.2.3</h2><p>fixed a bug</p></body></html>"))
+	}))
+	defer srv.Close()
+
+	it := Item{Name: "rust", Current: "1.2.3", Source: ghsource.Source{ManualURL: srv.URL}}
+	msg := fetchChangelogCmd(0, it)().(bodyFetchedMsg)
+	if !strings.Contains(msg.body, "fixed") {
+		t.Errorf("expected the converted section in body, got %q", msg.body)
+	}
+}
+
+func TestFetchChangelogCmd_NoRepoNoManualURL(t *testing.T) {
 	it := Item{Name: "mystery-pkg"}
-	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
+	msg := fetchChangelogCmd(0, it)().(bodyFetchedMsg)
 	if strings.Contains(msg.body, "http") {
 		t.Errorf("expected no URL in body when none is known, got %q", msg.body)
 	}
@@ -177,6 +191,21 @@ func TestUpdate_BodyFetchedMsg(t *testing.T) {
 	}
 	if nm.items[0].LoadingStage != "" {
 		t.Error("expected LoadingStage to be cleared")
+	}
+}
+
+func TestUpdate_StageMsgShowsStageAndKeepsListening(t *testing.T) {
+	m := readyModel(testItems(1))
+	next := make(chan tea.Msg, 1)
+	next <- bodyFetchedMsg{index: 0, body: "done", filename: "CHANGELOG.md"}
+
+	updated, cmd := m.Update(stageMsg{index: 0, stage: "CHANGELOG.md", next: next})
+	if got := updated.(model).items[0].LoadingStage; got != "CHANGELOG.md" {
+		t.Errorf("LoadingStage = %q, want CHANGELOG.md", got)
+	}
+	updated, _ = updated.(model).Update(cmd())
+	if it := updated.(model).items[0]; it.Body != "done" || it.ChangelogFilename != "CHANGELOG.md" {
+		t.Errorf("got body %q, filename %q after the next message", it.Body, it.ChangelogFilename)
 	}
 }
 

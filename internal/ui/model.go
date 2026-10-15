@@ -34,10 +34,10 @@ type Item struct {
 
 	ghsource.Source
 
-	// ChangelogFilename is the changelog file resolveChangelogCmd found in
-	// the GitHub repo, if any. Set once resolution has happened (which
-	// requires the item to have been expanded at least once); empty until
-	// then or if the repo uses releases instead of a changelog file.
+	// ChangelogFilename is the changelog file found in the GitHub repo, if
+	// any. Set once the body has been fetched (which requires the item to
+	// have been expanded at least once); empty until then or if the repo
+	// has no maintained changelog file.
 	ChangelogFilename string
 
 	Expanded bool
@@ -66,7 +66,7 @@ func (it Item) GitHubURL() string {
 
 // ChangelogURL returns the best link currently known for viewing this
 // item's changelog: a manual override if one is configured, the exact
-// changelog file once resolveChangelogCmd has found it, or the repo's
+// changelog file once fetchChangelogCmd has found it, or the repo's
 // releases page as a reasonable default before/without that resolution.
 // Empty if no GitHub repo could be resolved and no manual override exists.
 func (it Item) ChangelogURL() string {
@@ -157,107 +157,72 @@ func (m model) Init() tea.Cmd {
 }
 
 type bodyFetchedMsg struct {
-	index int
-	body  string
-}
-
-// changelogResolvedMsg reports which changelog filename (if any) should be
-// used. An empty filename means either none of the well-known candidates
-// exist, or the repo's releases are more recently updated than its
-// changelog file (see ghsource.ResolveChangelogSource) — either way, the
-// caller should fall back to releases.
-type changelogResolvedMsg struct {
 	index    int
-	filename string
+	body     string
+	filename string // changelog file found in the repo, if any
 }
 
-// resolveChangelogCmd determines whether to use the repo's changelog file
-// or its releases (ghsource.ResolveChangelogSource), which costs at most a
-// couple of small requests rather than probing each candidate changelog
-// filename with its own round trip.
-func resolveChangelogCmd(index int, it Item) tea.Cmd {
+// stageMsg reports that a changelog fetch has moved on to stage (see
+// ghsource.Source.Fetch); next delivers the fetch's following message.
+type stageMsg struct {
+	index int
+	stage string
+	next  <-chan tea.Msg
+}
+
+// fetchChangelogCmd runs ghsource.Source.Fetch in the background, delivering
+// a stageMsg as each stage starts and finally a bodyFetchedMsg.
+func fetchChangelogCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
-		if it.ManualURL != "" {
-			section, _, err := ghsource.FetchManualSection(it.ManualURL, it.Current, it.Installed, it.LaxHeadings)
-			if err != nil {
-				reason := "Could not fetch the configured changelog URL."
-				if errors.Is(err, ghsource.ErrHTML) {
-					reason = "The configured changelog is an HTML page, which can't be rendered here."
-				}
-				body := reason + "\n\n" + renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualURL))
-				return bodyFetchedMsg{index: index, body: body}
-			}
-			body := fmt.Sprintf("(from %s)", it.ManualURL) + "\n\n" + renderMarkdown(section)
-			return bodyFetchedMsg{index: index, body: body}
-		}
-		if it.Owner == "" {
-			return bodyFetchedMsg{index: index, body: "No GitHub repository could be resolved for this package; changelog unavailable."}
-		}
-		name, useReleases := ghsource.ResolveChangelogSource(it.Owner, it.Repo)
-		if useReleases {
-			return changelogResolvedMsg{index: index}
-		}
-		return changelogResolvedMsg{index: index, filename: name}
+		// Buffered for every message Fetch can produce (two stages plus the
+		// body), so the goroutine never blocks if the model stops listening.
+		msgs := make(chan tea.Msg, 3)
+		go func() {
+			c := it.Fetch(it.Installed, it.Current, func(stage string) {
+				msgs <- stageMsg{index: index, stage: stage, next: msgs}
+			})
+			msgs <- bodyFetchedMsg{index: index, body: renderChangelog(it, c), filename: c.Filename}
+		}()
+		return <-msgs
 	}
 }
 
-// fetchChangelogFileCmd fetches and trims the changelog filename
-// resolveChangelogCmd found (see ghsource.FetchChangelogSection). It falls
-// back to releases if that source turns out to be unusable — either the
-// fetch fails despite the listing saying the file exists (e.g. a race with
-// the repo changing), or the file doesn't actually document the target
-// version.
-func fetchChangelogFileCmd(index int, it Item, filename string) tea.Cmd {
-	return func() tea.Msg {
-		section, ok := ghsource.FetchChangelogSection(it.Owner, it.Repo, filename, it.Current, it.Installed, it.LaxHeadings)
-		if !ok {
-			return changelogResolvedMsg{index: index}
-		}
-		body := fmt.Sprintf("(from %s)", filename) + "\n\n" + renderMarkdown(section)
-		return bodyFetchedMsg{index: index, body: body}
-	}
+func receive(msgs <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg { return <-msgs }
 }
 
 // FetchReleases can return more than this when it.Current's tag sits deep in
 // the page (see its doc comment), so the TUI caps what it renders here.
 const maxDisplayedReleases = 10
 
-// fetchReleasesCmd checks GitHub releases, the second fetch stage, used only
-// when no changelog file was found.
-func fetchReleasesCmd(index int, it Item) tea.Cmd {
-	return func() tea.Msg {
-		releases, err := ghsource.FetchReleases(it.Owner, it.Repo, it.Installed, it.Current)
-		if err != nil || len(releases) == 0 {
-			return bodyFetchedMsg{index: index, body: "No changelog file or GitHub releases found for this package."}
-		}
-		if it.PrereleasesOnly {
-			releases = filterPrereleases(releases)
-			if len(releases) == 0 {
-				return bodyFetchedMsg{index: index, body: "No GitHub pre-releases found for this package."}
+func renderChangelog(it Item, c ghsource.Changelog) string {
+	switch c.Origin {
+	case ghsource.FromNone:
+		return "No GitHub repository could be resolved for this package; changelog unavailable."
+	case ghsource.FromManual:
+		if c.Err != nil {
+			reason := "Could not fetch the configured changelog URL."
+			if errors.Is(c.Err, ghsource.ErrHTML) {
+				reason = fmt.Sprintf("The configured changelog is an HTML page that doesn't appear to document %s.", it.Current)
 			}
+			return reason + "\n\n" + renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualURL))
 		}
-		if len(releases) > maxDisplayedReleases {
-			releases = releases[:maxDisplayedReleases]
-		}
-		var b strings.Builder
-		for _, r := range releases {
-			fmt.Fprintf(&b, "### %s (%s)\n\n%s\n\n", r.TagName, cmp.Or(r.PublishedAt, "unknown date"), cmp.Or(r.Body, "_no release notes_"))
-		}
-		body := "(from GitHub releases)\n\n" + renderMarkdown(b.String())
-		return bodyFetchedMsg{index: index, body: body}
+		return fmt.Sprintf("(from %s)", it.ManualURL) + "\n\n" + renderMarkdown(c.Section)
+	case ghsource.FromFile:
+		return fmt.Sprintf("(from %s)", c.Filename) + "\n\n" + renderMarkdown(c.Section)
 	}
-}
 
-// filterPrereleases keeps only GitHub-flagged pre-releases (see
-// ghsource.Source.PrereleasesOnly).
-func filterPrereleases(releases []ghsource.Release) []ghsource.Release {
-	filtered := releases[:0]
-	for _, r := range releases {
-		if r.Prerelease {
-			filtered = append(filtered, r)
+	if len(c.Releases) == 0 {
+		if it.PrereleasesOnly && c.Err == nil {
+			return "No GitHub pre-releases found for this package."
 		}
+		return "No changelog file or GitHub releases found for this package."
 	}
-	return filtered
+	var b strings.Builder
+	for _, r := range c.Releases[:min(len(c.Releases), maxDisplayedReleases)] {
+		fmt.Fprintf(&b, "### %s (%s)\n\n%s\n\n", r.TagName, cmp.Or(r.PublishedAt, "unknown date"), cmp.Or(r.Body, "_no release notes_"))
+	}
+	return "(from GitHub releases)\n\n" + renderMarkdown(b.String())
 }
 
 type upgradeDoneMsg struct {
@@ -388,7 +353,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			if it.Expanded && it.Body == "" && it.LoadingStage == "" {
 				it.LoadingStage = "changelog"
-				cmd = tea.Batch(resolveChangelogCmd(m.cursor, *it), m.spinner.Tick)
+				cmd = tea.Batch(fetchChangelogCmd(m.cursor, *it), m.spinner.Tick)
 			}
 			m.refreshViewport()
 			m.scrollToCursor()
@@ -437,23 +402,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(upgradePackage(m.cursor, *it), m.spinner.Tick)
 		}
 
-	case changelogResolvedMsg:
+	case stageMsg:
 		if msg.index >= 0 && msg.index < len(m.items) {
-			it := m.items[msg.index]
-			if msg.filename != "" {
-				m.items[msg.index].LoadingStage = msg.filename
-				m.items[msg.index].ChangelogFilename = msg.filename
-				m.refreshViewport()
-				return m, fetchChangelogFileCmd(msg.index, it, msg.filename)
-			}
-			m.items[msg.index].LoadingStage = "releases"
+			m.items[msg.index].LoadingStage = msg.stage
 			m.refreshViewport()
-			return m, fetchReleasesCmd(msg.index, it)
 		}
+		return m, receive(msg.next)
 
 	case bodyFetchedMsg:
 		if msg.index >= 0 && msg.index < len(m.items) {
 			m.items[msg.index].Body = msg.body
+			m.items[msg.index].ChangelogFilename = msg.filename
 			m.items[msg.index].LoadingStage = ""
 			m.refreshViewport()
 		}

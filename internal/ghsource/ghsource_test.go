@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func withTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
@@ -73,6 +75,14 @@ func TestResolveRepo(t *testing.T) {
 			wantOK:   false,
 		},
 		{
+			name:      "github subdomain is not a repo",
+			homepage:  "https://docs.github.com/en/copilot/how-tos/copilot-cli",
+			url:       "https://github.com/github/copilot-cli/releases/download/v1.0.0/copilot.tar.gz",
+			wantOwner: "github",
+			wantRepo:  "copilot-cli",
+			wantOK:    true,
+		},
+		{
 			name:   "both empty",
 			wantOK: false,
 		},
@@ -107,7 +117,7 @@ func TestResolveSource(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.pkg, func(t *testing.T) {
-			if got := ResolveSource(tt.pkg, tt.homepage, ""); got != tt.want {
+			if got := ResolveSource(tt.pkg, "", tt.homepage, ""); got != tt.want {
 				t.Errorf("got %+v, want %+v", got, tt.want)
 			}
 		})
@@ -187,24 +197,41 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		content, err := fetchRaw(srv.URL)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		content, isHTML, err := fetchRaw(srv.URL)
+		if err != nil || isHTML {
+			t.Fatalf("isHTML = %v, err = %v, want false, nil", isHTML, err)
 		}
 		if content != "## 1.2.3\n\nsome notes\n" {
 			t.Errorf("got %q", content)
 		}
 	})
 
-	t.Run("html response is rejected", func(t *testing.T) {
+	t.Run("html response is converted to markdown", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, "<html><body>not a changelog</body></html>")
+			fmt.Fprint(w, "<html><body><h2>1.2.3</h2></body></html>")
 		}))
 		defer srv.Close()
 
-		if _, err := fetchRaw(srv.URL); !errors.Is(err, ErrHTML) {
-			t.Errorf("err = %v, want ErrHTML", err)
+		content, isHTML, err := fetchRaw(srv.URL)
+		if err != nil || !isHTML || content != "## 1.2.3" {
+			t.Errorf("got (%q, %v, %v), want (\"## 1.2.3\", true, nil)", content, isHTML, err)
+		}
+	})
+
+	t.Run("stalled server times out", func(t *testing.T) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-release
+		}))
+		defer srv.Close()
+		defer close(release)
+		orig := httpClient
+		httpClient = &http.Client{Timeout: 50 * time.Millisecond}
+		defer func() { httpClient = orig }()
+
+		if _, _, err := fetchRaw(srv.URL); err == nil {
+			t.Error("expected error for a stalled server")
 		}
 	})
 
@@ -214,7 +241,7 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := fetchRaw(srv.URL); err == nil {
+		if _, _, err := fetchRaw(srv.URL); err == nil {
 			t.Error("expected error for 404")
 		}
 	})
@@ -233,6 +260,26 @@ func TestFetchManualSection_NonGitHub(t *testing.T) {
 	}
 	if section != "## 2.0.0\nnew stuff" {
 		t.Errorf("got %q", section)
+	}
+}
+
+func TestFetchManualSection_HTMLIsConvertedToMarkdown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "<html><body><nav>Home</nav><h2>Version 2.0.0</h2><ul><li>new stuff</li></ul><h2>Version 1.0.0</h2><p>old stuff</p></body></html>")
+	}))
+	defer srv.Close()
+
+	section, found, err := FetchManualSection(srv.URL, "2.0.0", "1.0.0", false)
+	if err != nil || !found {
+		t.Fatalf("err = %v, found = %v, want nil, true", err, found)
+	}
+	if section != "## Version 2.0.0\n\n- new stuff\n" {
+		t.Errorf("got %q", section)
+	}
+
+	if _, _, err := FetchManualSection(srv.URL, "3.0.0", "2.0.0", false); !errors.Is(err, ErrHTML) {
+		t.Errorf("err = %v, want ErrHTML for an HTML page that doesn't document the version", err)
 	}
 }
 
@@ -280,7 +327,7 @@ func TestResolveChangelogFilename_PicksFirstMatch(t *testing.T) {
 		}
 	})
 
-	filename, _, ok, _ := resolveChangelogFilename("o", "r")
+	filename, ok, _ := resolveChangelogFilename("o", "r")
 	if !ok {
 		t.Fatal("expected ok = true")
 	}
@@ -308,7 +355,7 @@ func TestResolveChangelogFilename_FallsThroughToLaterName(t *testing.T) {
 		}
 	})
 
-	filename, _, ok, _ := resolveChangelogFilename("o", "r")
+	filename, ok, _ := resolveChangelogFilename("o", "r")
 	content, _ := fetchGitHubFile("o", "r", filename, "")
 	if !ok || filename != "HISTORY.md" || content != "history notes" {
 		t.Errorf("got (%q, %q, %v), want (HISTORY.md, \"history notes\", true)", filename, content, ok)
@@ -318,7 +365,7 @@ func TestResolveChangelogFilename_FallsThroughToLaterName(t *testing.T) {
 func TestResolveChangelogFilename_NoneFound(t *testing.T) {
 	withTestServer(t, rootListingHandler("README.md", "LICENSE"))
 
-	_, _, ok, _ := resolveChangelogFilename("o", "r")
+	_, ok, _ := resolveChangelogFilename("o", "r")
 	if ok {
 		t.Error("expected ok = false when no changelog file exists")
 	}
@@ -344,7 +391,7 @@ func TestResolveChangelogFilename_MultipleMatchesPicksMostRecentlyCommitted(t *t
 		}
 	})
 
-	filename, _, found, err := resolveChangelogFilename("o", "r")
+	filename, found, err := resolveChangelogFilename("o", "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -358,49 +405,12 @@ func TestResolveChangelogFilename_ListingError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	_, _, found, err := resolveChangelogFilename("o", "r")
+	_, found, err := resolveChangelogFilename("o", "r")
 	if err == nil {
 		t.Error("expected error on non-200 listing response")
 	}
 	if found {
 		t.Error("expected found = false on listing error")
-	}
-}
-
-func changelogSourceServer(t *testing.T, changelogCommitDate, latestReleaseDate string) {
-	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/repos/o/r/contents/":
-			rootListingHandler("CHANGELOG.md")(w, r)
-		case r.URL.Path == "/repos/o/r/commits" && r.URL.Query().Get("path") == "CHANGELOG.md":
-			body, _ := json.Marshal([]map[string]any{
-				{"commit": map[string]any{"committer": map[string]string{"date": changelogCommitDate}}},
-			})
-			w.Write(body)
-		case r.URL.Path == "/repos/o/r/releases":
-			body, _ := json.Marshal([]map[string]string{{"published_at": latestReleaseDate, "tag_name": "v1"}})
-			w.Write(body)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	})
-}
-
-func TestResolveChangelogSource_PrefersReleasesWhenNewerThanChangelogFile(t *testing.T) {
-	changelogSourceServer(t, "2020-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-
-	filename, useReleases := ResolveChangelogSource("o", "r")
-	if !useReleases || filename != "" {
-		t.Errorf("got (%q, %v), want (\"\", true)", filename, useReleases)
-	}
-}
-
-func TestResolveChangelogSource_PrefersChangelogFileWhenNewerThanReleases(t *testing.T) {
-	changelogSourceServer(t, "2026-01-01T00:00:00Z", "2020-01-01T00:00:00Z")
-
-	filename, useReleases := ResolveChangelogSource("o", "r")
-	if useReleases || filename != "CHANGELOG.md" {
-		t.Errorf("got (%q, %v), want (\"CHANGELOG.md\", false)", filename, useReleases)
 	}
 }
 
@@ -430,7 +440,7 @@ func TestFetchReleases_StopsAtInstalledAcrossPages(t *testing.T) {
 	apiBaseURL = srv.URL
 	t.Cleanup(func() { apiBaseURL = orig })
 
-	releases, err := FetchReleases("o", "r", "1.0.0", "")
+	releases, err := FetchReleases("o", "r", "1.0.0", "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -457,7 +467,7 @@ func TestFetchReleases_TargetVersionBeyondTwentyButWithinFirstPage(t *testing.T)
 
 	// v25.0.0 is the 26th release, past the old hard cap of 20, but still
 	// well within the single page a target search fetches.
-	releases, err := FetchReleases("o", "r", "", "25.0.0")
+	releases, err := FetchReleases("o", "r", "", "25.0.0", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -484,7 +494,7 @@ func TestFetchReleases_SkippedVersionIncludesIntermediateRelease(t *testing.T) {
 	// 0.34.2): the target version (0.34.2) is the newest entry, so it must
 	// not be treated as a stopping point — v0.34.1 in between also needs to
 	// be included.
-	releases, err := FetchReleases("o", "r", "0.34.0", "0.34.2")
+	releases, err := FetchReleases("o", "r", "0.34.0", "0.34.2", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -514,14 +524,15 @@ func TestFetchReleases_TargetVersionNotFound_FallsBackToTwentyWithoutASecondPage
 	// "999.0.0" never appears anywhere in the page, so this exercises the
 	// best-effort fallback: truncate to the usual 20 rather than treat a
 	// missing tag as an error, and don't page further looking for it. It
-	// also checks /releases/latest as a last resort (v100.0.0, which still
-	// doesn't match), so that's the only extra request expected.
-	releases, err := FetchReleases("o", "r", "", "999.0.0")
+	// also checks /releases/latest (v100.0.0, which still doesn't match)
+	// and the two direct /releases/tags lookups as a last resort, so those
+	// are the only extra requests expected.
+	releases, err := FetchReleases("o", "r", "", "999.0.0", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if requests != 2 {
-		t.Fatalf("got %d requests, want 2 (target search must not fetch a second list page, only the /releases/latest fallback)", requests)
+	if requests != 4 {
+		t.Fatalf("got %d requests, want 4 (target search must not fetch a second list page, only the /releases/latest and /releases/tags fallbacks)", requests)
 	}
 	if len(releases) != 20 {
 		t.Fatalf("got %d releases, want 20 (best-effort fallback)", len(releases))
@@ -549,12 +560,69 @@ func TestFetchReleases_TargetVersionMissingFromListButLatest_IsAppended(t *testi
 	// Reproduces a GitHub API quirk where a just-published release is
 	// absent from the paginated /releases list (its search index lags)
 	// even though /releases/latest already reflects it.
-	releases, err := FetchReleases("o", "r", "4.6.6", "4.6.7")
+	releases, err := FetchReleases("o", "r", "4.6.6", "4.6.7", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(releases) != 1 || releases[0].TagName != "v4.6.7" {
 		t.Fatalf("got %+v, want single release v4.6.7 from the /releases/latest fallback", releases)
+	}
+}
+
+func TestFetchReleases_TargetVersionBeyondFirstPage_FetchedByTag(t *testing.T) {
+	var page []Release
+	for i := 100; i > 0; i-- {
+		page = append(page, Release{TagName: fmt.Sprintf("b%d", 1000+i)})
+	}
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/releases/latest":
+			json.NewEncoder(w).Encode(Release{TagName: "b1100"})
+		case "/repos/o/r/releases/tags/v0.6.0":
+			json.NewEncoder(w).Encode(Release{TagName: "v0.6.0", Body: "notes"})
+		case "/repos/o/r/releases":
+			json.NewEncoder(w).Encode(page)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// Repos like llama.cpp (per-commit "bNNNN" builds) or gemini-cli
+	// (nightlies) bury the Homebrew version past the first page; everything
+	// on that page is newer than the target, so only the target is shown.
+	releases, err := FetchReleases("o", "r", "0.5.0", "0.6.0", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 1 || releases[0].TagName != "v0.6.0" {
+		t.Fatalf("got %+v, want single release v0.6.0 fetched by tag", releases)
+	}
+}
+
+func TestFetchReleases_PrereleaseTargetBeyondFirstPage_FetchedByPreTag(t *testing.T) {
+	var page []Release
+	for i := 100; i > 0; i-- {
+		page = append(page, Release{TagName: fmt.Sprintf("v2.%d.0-pre", i), Prerelease: true})
+	}
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/releases/tags/v1.25.0":
+			json.NewEncoder(w).Encode(Release{TagName: "v1.25.0"})
+		case "/repos/o/r/releases/tags/v1.25.0-pre":
+			json.NewEncoder(w).Encode(Release{TagName: "v1.25.0-pre", Prerelease: true})
+		case "/repos/o/r/releases":
+			json.NewEncoder(w).Encode(page)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	releases, err := FetchReleases("o", "r", "1.24.0", "1.25.0", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(releases) != 1 || releases[0].TagName != "v1.25.0-pre" {
+		t.Fatalf("got %+v, want single pre-release v1.25.0-pre fetched by tag", releases)
 	}
 }
 
@@ -568,7 +636,7 @@ func TestFetchReleases_TagPrefixOtherThanV(t *testing.T) {
 		w.Write(body)
 	})
 
-	releases, err := FetchReleases("o", "r", "1.8.1", "")
+	releases, err := FetchReleases("o", "r", "1.8.1", "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -593,7 +661,7 @@ func TestFetchReleases_FallsBackToTagsWhenNoReleases(t *testing.T) {
 		}
 	})
 
-	releases, err := FetchReleases("o", "r", "1.0.0", "")
+	releases, err := FetchReleases("o", "r", "1.0.0", "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -616,7 +684,7 @@ func TestFetchReleases_NoFallbackWhenReleasesExistButNoneAreNewer(t *testing.T) 
 		}
 	})
 
-	releases, err := FetchReleases("o", "r", "1.0.0", "")
+	releases, err := FetchReleases("o", "r", "1.0.0", "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -630,7 +698,7 @@ func TestFetchReleases_ErrorStatus(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	_, err := FetchReleases("o", "r", "1.0.0", "")
+	_, err := FetchReleases("o", "r", "1.0.0", "", false)
 	if err == nil {
 		t.Error("expected error on non-200 status")
 	}
@@ -670,5 +738,83 @@ func TestNextPageURL(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// fetchServer serves a repo whose CHANGELOG.md is newer than its releases
+// (so it's preferred) but only documents changelogVersion.
+func fetchServer(t *testing.T, changelogVersion string, releases []Release) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/contents/":
+			rootListingHandler("CHANGELOG.md")(w, r)
+		case "/repos/o/r/contents/CHANGELOG.md":
+			content := base64.StdEncoding.EncodeToString([]byte("## " + changelogVersion + "\nnotes\n"))
+			json.NewEncoder(w).Encode(contentsResponse{Content: content})
+		case "/repos/o/r/commits":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"commit": map[string]any{"committer": map[string]string{"date": "2026-01-01T00:00:00Z"}}},
+			})
+		case "/repos/o/r/releases":
+			json.NewEncoder(w).Encode(releases)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
+func TestSourceFetch_UsesChangelogFile(t *testing.T) {
+	fetchServer(t, "2.0.0", nil)
+
+	var stages []string
+	c := Source{Owner: "o", Repo: "r"}.Fetch("1.0.0", "2.0.0", func(s string) { stages = append(stages, s) })
+	if c.Origin != FromFile || !c.Found || c.Section != "## 2.0.0\nnotes\n" {
+		t.Errorf("got %+v, want the CHANGELOG.md section", c)
+	}
+	if strings.Join(stages, ",") != "CHANGELOG.md" {
+		t.Errorf("stages = %v, want [CHANGELOG.md]", stages)
+	}
+}
+
+func TestSourceFetch_PrefersFileDocumentingTargetOverNewerReleases(t *testing.T) {
+	// opencode: a release published after the changelog's last commit (for
+	// an older branch) mustn't hide a changelog that documents the target.
+	fetchServer(t, "2.0.0", []Release{{TagName: "v1.19.1", PublishedAt: "2027-01-01T00:00:00Z"}})
+
+	c := Source{Owner: "o", Repo: "r"}.Fetch("1.0.0", "2.0.0", nil)
+	if c.Origin != FromFile || !c.Found {
+		t.Errorf("got %+v, want the CHANGELOG.md section", c)
+	}
+}
+
+func TestSourceFetch_FileLacksVersionFallsBackToReleases(t *testing.T) {
+	fetchServer(t, "1.0.0", []Release{{TagName: "v2.0.0", PublishedAt: "2020-01-01T00:00:00Z"}, {TagName: "v1.0.0"}})
+
+	var stages []string
+	c := Source{Owner: "o", Repo: "r"}.Fetch("1.0.0", "2.0.0", func(s string) { stages = append(stages, s) })
+	if c.Origin != FromReleases || !c.Found || c.Filename != "CHANGELOG.md" || len(c.Releases) != 1 {
+		t.Errorf("got %+v, want releases [v2.0.0] with Filename CHANGELOG.md", c)
+	}
+	if strings.Join(stages, ",") != "CHANGELOG.md,releases" {
+		t.Errorf("stages = %v, want [CHANGELOG.md releases]", stages)
+	}
+}
+
+func TestSourceFetch_PrereleasesOnly(t *testing.T) {
+	fetchServer(t, "1.0.0", []Release{
+		{TagName: "v2.1.0-pre", Prerelease: true, PublishedAt: "2020-01-01T00:00:00Z"},
+		{TagName: "v2.0.0"},
+		{TagName: "v1.0.0-pre", Prerelease: true},
+	})
+
+	c := Source{Owner: "o", Repo: "r", PrereleasesOnly: true}.Fetch("1.0.0", "2.1.0", nil)
+	if len(c.Releases) != 1 || c.Releases[0].TagName != "v2.1.0-pre" || !c.Found {
+		t.Errorf("got %+v, want only the v2.1.0-pre pre-release", c)
+	}
+}
+
+func TestSourceFetch_NoRepo(t *testing.T) {
+	if c := (Source{}).Fetch("1.0.0", "2.0.0", nil); c.Origin != FromNone {
+		t.Errorf("Origin = %v, want FromNone", c.Origin)
 	}
 }
