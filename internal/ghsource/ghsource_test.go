@@ -252,7 +252,7 @@ func rootListingHandler(names ...string) http.HandlerFunc {
 	}
 }
 
-func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
+func TestResolveChangelogFilename_PicksFirstMatch(t *testing.T) {
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/contents/":
@@ -267,10 +267,11 @@ func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
 		}
 	})
 
-	filename, content, ok := FetchChangelogFile("o", "r")
+	filename, _, ok, _ := resolveChangelogFilename("o", "r")
 	if !ok {
 		t.Fatal("expected ok = true")
 	}
+	content, _ := fetchGitHubFile("o", "r", filename, "")
 	if filename != "CHANGELOG.md" {
 		t.Errorf("got filename %q, want CHANGELOG.md", filename)
 	}
@@ -279,7 +280,7 @@ func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
 	}
 }
 
-func TestFetchChangelogFile_FallsThroughToLaterName(t *testing.T) {
+func TestResolveChangelogFilename_FallsThroughToLaterName(t *testing.T) {
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/contents/":
@@ -294,16 +295,17 @@ func TestFetchChangelogFile_FallsThroughToLaterName(t *testing.T) {
 		}
 	})
 
-	filename, content, ok := FetchChangelogFile("o", "r")
+	filename, _, ok, _ := resolveChangelogFilename("o", "r")
+	content, _ := fetchGitHubFile("o", "r", filename, "")
 	if !ok || filename != "HISTORY.md" || content != "history notes" {
 		t.Errorf("got (%q, %q, %v), want (HISTORY.md, \"history notes\", true)", filename, content, ok)
 	}
 }
 
-func TestFetchChangelogFile_NoneFound(t *testing.T) {
+func TestResolveChangelogFilename_NoneFound(t *testing.T) {
 	withTestServer(t, rootListingHandler("README.md", "LICENSE"))
 
-	_, _, ok := FetchChangelogFile("o", "r")
+	_, _, ok, _ := resolveChangelogFilename("o", "r")
 	if ok {
 		t.Error("expected ok = false when no changelog file exists")
 	}
@@ -329,7 +331,7 @@ func TestResolveChangelogFilename_MultipleMatchesPicksMostRecentlyCommitted(t *t
 		}
 	})
 
-	filename, found, err := ResolveChangelogFilename("o", "r")
+	filename, _, found, err := resolveChangelogFilename("o", "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -343,7 +345,7 @@ func TestResolveChangelogFilename_ListingError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	_, found, err := ResolveChangelogFilename("o", "r")
+	_, _, found, err := resolveChangelogFilename("o", "r")
 	if err == nil {
 		t.Error("expected error on non-200 listing response")
 	}

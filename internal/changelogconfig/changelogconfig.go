@@ -7,7 +7,6 @@ package changelogconfig
 import (
 	_ "embed"
 	"encoding/json"
-	"sync"
 )
 
 //go:embed changelog_config.json
@@ -23,34 +22,28 @@ type entry struct {
 	LaxHeadings bool   `json:"lax_headings"`
 }
 
-var (
-	once    sync.Once
-	entries map[string]entry
-)
+var entries = parse()
 
-func load() map[string]entry {
-	once.Do(func() {
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err != nil {
-			entries = map[string]entry{}
-			return
+func parse() map[string]entry {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	delete(raw, "_comment")
+	parsed := make(map[string]entry, len(raw))
+	for name, msg := range raw {
+		var e entry
+		if err := json.Unmarshal(msg, &e); err == nil {
+			parsed[name] = e
 		}
-		delete(raw, "_comment")
-		entries = make(map[string]entry, len(raw))
-		for name, msg := range raw {
-			var e entry
-			if err := json.Unmarshal(msg, &e); err == nil {
-				entries[name] = e
-			}
-		}
-	})
-	return entries
+	}
+	return parsed
 }
 
 // Lookup returns the known changelog URL for a Homebrew formula or cask
 // name, if one is recorded.
 func Lookup(name string) (url string, ok bool) {
-	e, found := load()[name]
+	e, found := entries[name]
 	if !found || e.URL == "" {
 		return "", false
 	}
@@ -60,5 +53,5 @@ func Lookup(name string) (url string, ok bool) {
 // LaxHeadings reports whether name's changelog file should be matched with
 // a looser version-heading rule (see entry.LaxHeadings).
 func LaxHeadings(name string) bool {
-	return load()[name].LaxHeadings
+	return entries[name].LaxHeadings
 }

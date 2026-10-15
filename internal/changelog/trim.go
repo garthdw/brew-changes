@@ -32,11 +32,7 @@ func TrimToRange(content, newVersion, installedVersion string, lax bool) (string
 
 	startLine := findHeading(lines, newVersion, lax)
 	if startLine == -1 {
-		end := MaxContentLines
-		if end > len(lines) {
-			end = len(lines)
-		}
-		result := strings.Join(lines[:end], "\n")
+		result := strings.Join(lines[:min(MaxContentLines, len(lines))], "\n")
 		return result + fmt.Sprintf("\n\n... (couldn't locate version headings, showing first %d lines)", MaxContentLines), false
 	}
 
@@ -46,12 +42,8 @@ func TrimToRange(content, newVersion, installedVersion string, lax bool) (string
 	}
 
 	end := startLine + MaxContentLines
-	truncated := end < len(lines)
-	if end > len(lines) {
-		end = len(lines)
-	}
-	result := strings.Join(lines[startLine:end], "\n")
-	if truncated {
+	result := strings.Join(lines[startLine:min(end, len(lines))], "\n")
+	if end < len(lines) {
 		result += fmt.Sprintf("\n\n... (truncated, showing %d lines from the %s heading)", MaxContentLines, newVersion)
 	}
 	return result, true
@@ -87,15 +79,7 @@ func isSetextUnderline(line string) bool {
 		return false
 	}
 	c := trimmed[0]
-	if c != '=' && c != '-' {
-		return false
-	}
-	for i := 0; i < len(trimmed); i++ {
-		if trimmed[i] != c {
-			return false
-		}
-	}
-	return true
+	return (c == '=' || c == '-') && strings.Trim(trimmed, string(c)) == ""
 }
 
 // containsVersion reports whether line contains version as a standalone
@@ -111,7 +95,7 @@ func containsVersion(line, version string) bool {
 		}
 		idx += start
 		end := idx + len(version)
-		beforeOK := idx == 0 || !isVersionChar(line[idx-1])
+		beforeOK := idx == 0 || !IsVersionChar(line[idx-1])
 		afterOK := end == len(line) || !isDigit(line[end])
 		if beforeOK && afterOK {
 			return true
@@ -120,7 +104,9 @@ func containsVersion(line, version string) bool {
 	}
 }
 
-func isVersionChar(b byte) bool {
+// IsVersionChar reports whether b can continue a version number, i.e. a
+// digit or '.', for checking that a version match isn't part of a longer one.
+func IsVersionChar(b byte) bool {
 	return isDigit(b) || b == '.'
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -49,9 +50,11 @@ type Item struct {
 	// Markdown headings.
 	LaxHeadings bool
 
-	Expanded     bool
-	Loading      bool
-	LoadingStage string // "changelog" while resolving/fetching the changelog file, or "releases" once falling back to release notes
+	Expanded bool
+	// LoadingStage is non-empty while the body is being fetched: "changelog"
+	// while resolving the source, the changelog filename while fetching it,
+	// or "releases" once falling back to release notes.
+	LoadingStage string
 	Body         string // rendered changelog/releases content, empty until fetched
 
 	// Upgrading, Upgraded, and UpgradeErr track an in-place single-package
@@ -160,7 +163,7 @@ func Run(items []Item) (Result, error) {
 }
 
 func (m model) Init() tea.Cmd {
-	return m.spinner.Tick
+	return nil
 }
 
 type bodyFetchedMsg struct {
@@ -285,8 +288,12 @@ func upgradePackage(index int, it Item) tea.Cmd {
 	}
 }
 
-// openURL opens url in the user's default browser via macOS's `open`.
+// openURL opens url in the user's default browser via macOS's `open`, or
+// does nothing if url is empty.
 func openURL(url string) tea.Cmd {
+	if url == "" {
+		return nil
+	}
 	return func() tea.Msg {
 		_ = exec.Command("open", url).Start()
 		return nil
@@ -336,10 +343,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		vpHeight := msg.Height - headerLines - footerLines
-		if vpHeight < 1 {
-			vpHeight = 1
-		}
+		vpHeight := max(msg.Height-headerLines-footerLines, 1)
 		if !m.ready {
 			m.viewport = viewport.New(viewport.WithWidth(msg.Width), viewport.WithHeight(vpHeight))
 			m.ready = true
@@ -368,18 +372,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "move-up":
 			m.moveCursor(-1)
-			m.refreshViewport()
 
 		case "move-down":
 			m.moveCursor(1)
-			m.refreshViewport()
 
 		case "move-up-or-scroll-up":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
 				m.viewport.ScrollUp(1)
 			} else {
 				m.moveCursor(-1)
-				m.refreshViewport()
 			}
 
 		case "move-down-or-scroll-down":
@@ -387,7 +388,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.ScrollDown(1)
 			} else {
 				m.moveCursor(1)
-				m.refreshViewport()
 			}
 
 		case "toggle-expand":
@@ -396,49 +396,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			it := &m.items[m.cursor]
 			it.Expanded = !it.Expanded
-			if it.Expanded && it.Body == "" && !it.Loading {
-				it.Loading = true
+			var cmd tea.Cmd
+			if it.Expanded && it.Body == "" && it.LoadingStage == "" {
 				it.LoadingStage = "changelog"
-				m.refreshViewport()
-				m.scrollToCursor()
-				return m, resolveChangelogCmd(m.cursor, *it)
+				cmd = tea.Batch(resolveChangelogCmd(m.cursor, *it), m.spinner.Tick)
 			}
 			m.refreshViewport()
 			m.scrollToCursor()
+			return m, cmd
 
 		case "open-homepage":
 			if len(m.items) == 0 {
 				return m, nil
 			}
 			it := m.items[m.cursor]
-			url := it.Homepage
-			if url == "" {
-				url = it.GitHubURL()
-			}
-			if url == "" {
-				return m, nil
-			}
-			return m, openURL(url)
+			return m, openURL(cmp.Or(it.Homepage, it.GitHubURL()))
 
 		case "open-github":
 			if len(m.items) == 0 {
 				return m, nil
 			}
-			url := m.items[m.cursor].GitHubURL()
-			if url == "" {
-				return m, nil
-			}
-			return m, openURL(url)
+			return m, openURL(m.items[m.cursor].GitHubURL())
 
 		case "open-changelog":
 			if len(m.items) == 0 {
 				return m, nil
 			}
-			url := m.items[m.cursor].ChangelogURL()
-			if url == "" {
-				return m, nil
-			}
-			return m, openURL(url)
+			return m, openURL(m.items[m.cursor].ChangelogURL())
 
 		case "upgrade-all":
 			for i := range m.items {
@@ -461,7 +445,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it.UpgradeErr = ""
 			m.refreshViewport()
 			m.scrollToCursor()
-			return m, upgradePackage(m.cursor, *it)
+			return m, tea.Batch(upgradePackage(m.cursor, *it), m.spinner.Tick)
 		}
 
 	case changelogResolvedMsg:
@@ -481,7 +465,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bodyFetchedMsg:
 		if msg.index >= 0 && msg.index < len(m.items) {
 			m.items[msg.index].Body = msg.body
-			m.items[msg.index].Loading = false
 			m.items[msg.index].LoadingStage = ""
 			m.refreshViewport()
 		}
@@ -499,32 +482,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case spinner.TickMsg:
+		// Let the tick loop lapse while idle; it's restarted (deduped by the
+		// spinner's tag) whenever a load or upgrade begins.
+		if !slices.ContainsFunc(m.items, func(it Item) bool { return it.LoadingStage != "" || it.Upgrading }) {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		for _, it := range m.items {
-			if it.Loading || it.Upgrading {
-				m.refreshViewport()
-				break
-			}
-		}
+		m.refreshViewport()
 		return m, cmd
 	}
 
 	return m, nil
 }
 
-// moveCursor moves the highlighted item by delta and scrolls it into view.
+// moveCursor moves the highlighted item by delta, re-renders the list so the
+// cursor marker follows, and scrolls it into view.
 func (m *model) moveCursor(delta int) {
 	if len(m.items) == 0 {
 		return
 	}
-	m.cursor += delta
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
-	if m.cursor > len(m.items)-1 {
-		m.cursor = len(m.items) - 1
-	}
+	m.cursor = min(max(m.cursor+delta, 0), len(m.items)-1)
+	m.refreshViewport()
 	m.scrollToCursor()
 }
 
@@ -670,15 +649,14 @@ func (m model) renderList() (string, []int) {
 			nameKind = styleSelected.Render(nameKind)
 		}
 
-		line := fmt.Sprintf("%s%s  %s -> %s  %s%s",
+		writeLine(fmt.Sprintf("%s%s  %s -> %s  %s%s",
 			cursor, nameKind,
 			versionStyle.Render(it.Installed), versionStyle.Render(it.Current),
-			sourceHint, statusTag)
-		writeLine(line)
+			sourceHint, statusTag))
 
 		if it.Expanded {
 			switch {
-			case it.Loading:
+			case it.LoadingStage != "":
 				var content string
 				if it.LoadingStage == "releases" {
 					content = m.spinner.View() + " fetching releases..."

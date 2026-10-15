@@ -129,29 +129,33 @@ func get(url string) (*http.Response, error) {
 
 // getJSON fetches url and unmarshals the JSON response body into out.
 func getJSON(url string, out any) error {
+	_, err := getJSONPage(url, out)
+	return err
+}
+
+// getJSONPage is getJSON for paginated endpoints, additionally returning
+// the Link header's next-page URL (empty on the last page).
+func getJSONPage(url string, out any) (next string, err error) {
 	resp, err := get(url)
 	if err != nil {
-		return err
+		return "", err
 	}
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+		return "", fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
-	return json.Unmarshal(body, out)
+	if err := json.Unmarshal(body, out); err != nil {
+		return "", fmt.Errorf("parsing %s: %w", url, err)
+	}
+	return nextPageURL(resp.Header.Get("Link")), nil
 }
 
 type contentsResponse struct {
 	Content string `json:"content"`
-}
-
-// FetchChangelogFileAt fetches a single named file's content from the
-// repo's default branch.
-func FetchChangelogFileAt(owner, repo, filename string) (content string, ok bool) {
-	return fetchGitHubFile(owner, repo, filename, "")
 }
 
 // fetchGitHubFile fetches a file via the Contents API, falling back to a
@@ -221,7 +225,7 @@ func FetchRaw(rawURL string) (content string, ok bool, contentType string) {
 }
 
 func fetchRawOnce(rawURL string) (content string, ok bool, contentType string, retryable bool) {
-	resp, err := http.Get(rawURL)
+	resp, err := httpClient.Get(rawURL)
 	if err != nil {
 		return "", false, "", true
 	}
@@ -230,7 +234,7 @@ func fetchRawOnce(rawURL string) (content string, ok bool, contentType string, r
 	if resp.StatusCode != http.StatusOK {
 		return "", false, contentType, resp.StatusCode >= 500
 	}
-	if strings.Contains(resp.Header.Get("Content-Type"), "html") {
+	if strings.Contains(contentType, "html") {
 		return "", false, contentType, false
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -272,7 +276,7 @@ func FetchManualSection(rawURL, newVersion, installedVersion string, lax bool) (
 // lax relaxes version-heading matching for formulae recorded as needing it
 // in changelogconfig (see changelog.TrimToRange).
 func FetchChangelogSection(owner, repo, filename, newVersion, installedVersion string, lax bool) (section string, ok bool) {
-	content, ok := FetchChangelogFileAt(owner, repo, filename)
+	content, ok := fetchGitHubFile(owner, repo, filename, "")
 	if !ok {
 		return "", false
 	}
@@ -284,25 +288,15 @@ type repoContentEntry struct {
 	Type string `json:"type"`
 }
 
-// ResolveChangelogFilename lists the repo's root directory in a single
+// resolveChangelogFilename lists the repo's root directory in a single
 // request and returns the well-known changelog filename present there. This
 // avoids probing each candidate filename with its own round trip (which can
 // add seconds of latency on repos where the first few candidates all miss).
 // If more than one candidate exists, the most recently committed one wins
-// (see lastCommitDate), on the theory that it's the one still maintained.
-// found is false if none of the candidates exist; err is set only if the
-// listing request itself failed.
-func ResolveChangelogFilename(owner, repo string) (filename string, found bool, err error) {
-	name, _, found, err := resolveChangelogFilename(owner, repo)
-	return name, found, err
-}
-
-// resolveChangelogFilename is ResolveChangelogFilename's implementation. It
-// additionally returns the winning candidate's last-commit date when
-// already known — i.e. when mostRecentlyCommitted had to fetch it to break
-// a tie between multiple candidates — so ResolveChangelogSource can reuse
-// that date instead of re-fetching it. date is the zero value when there
-// was only one candidate (no tie-break needed, so no date was fetched).
+// (see lastCommitDate), on the theory that it's the one still maintained,
+// and its date is returned so ResolveChangelogSource needn't re-fetch it;
+// otherwise date is the zero value. found is false if none of the
+// candidates exist; err is set only if the listing request itself failed.
 func resolveChangelogFilename(owner, repo string) (filename string, date time.Time, found bool, err error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/", apiBaseURL, owner, repo)
 	var entries []repoContentEntry
@@ -341,11 +335,7 @@ func mostRecentlyCommitted(owner, repo string, filenames []string) (string, time
 	dates := make([]time.Time, len(filenames))
 	var wg sync.WaitGroup
 	for i, name := range filenames {
-		wg.Add(1)
-		go func(i int, name string) {
-			defer wg.Done()
-			dates[i] = lastCommitDate(owner, repo, name)
-		}(i, name)
+		wg.Go(func() { dates[i] = lastCommitDate(owner, repo, name) })
 	}
 	wg.Wait()
 
@@ -381,20 +371,6 @@ func lastCommitDate(owner, repo, filename string) time.Time {
 	return t
 }
 
-// FetchChangelogFile resolves and fetches the repo's changelog file,
-// returning the filename found and its content.
-func FetchChangelogFile(owner, repo string) (filename, content string, ok bool) {
-	name, found, err := ResolveChangelogFilename(owner, repo)
-	if err != nil || !found {
-		return "", "", false
-	}
-	content, ok = FetchChangelogFileAt(owner, repo, name)
-	if !ok {
-		return "", "", false
-	}
-	return name, content, true
-}
-
 // ResolveChangelogSource decides between a repo's changelog file and its
 // GitHub releases: some repos stop maintaining a CHANGELOG.md (or similar)
 // after switching to GitHub Releases, leaving the stale file in place. If a
@@ -409,24 +385,12 @@ func ResolveChangelogSource(owner, repo string) (filename string, useReleases bo
 	}
 
 	var releaseDate time.Time
-	if !fileDate.IsZero() {
-		// Multiple candidates existed, so resolveChangelogFilename already
-		// fetched the winning file's commit date while breaking the tie;
-		// only the release date is still needed.
-		releaseDate = latestReleaseDate(owner, repo)
-	} else {
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			fileDate = lastCommitDate(owner, repo, name)
-		}()
-		go func() {
-			defer wg.Done()
-			releaseDate = latestReleaseDate(owner, repo)
-		}()
-		wg.Wait()
+	var wg sync.WaitGroup
+	wg.Go(func() { releaseDate = latestReleaseDate(owner, repo) })
+	if fileDate.IsZero() {
+		fileDate = lastCommitDate(owner, repo, name)
 	}
+	wg.Wait()
 
 	if !releaseDate.IsZero() && releaseDate.After(fileDate) {
 		return "", true
@@ -491,8 +455,7 @@ func exactSuffixMatch(tag, version string) bool {
 	if len(tag) == len(version) {
 		return true
 	}
-	boundary := tag[len(tag)-len(version)-1]
-	return boundary != '.' && (boundary < '0' || boundary > '9')
+	return !changelog.IsVersionChar(tag[len(tag)-len(version)-1])
 }
 
 var trailingVersionPattern = regexp.MustCompile(`[0-9]+(\.[0-9]+)*$`)
@@ -507,11 +470,8 @@ func trailingComponentsMatch(tag, version string) bool {
 	if loc == nil {
 		return false
 	}
-	if loc[0] > 0 {
-		boundary := tag[loc[0]-1]
-		if boundary == '.' || (boundary >= '0' && boundary <= '9') {
-			return false
-		}
+	if loc[0] > 0 && changelog.IsVersionChar(tag[loc[0]-1]) {
+		return false
 	}
 
 	tagParts := strings.Split(tag[loc[0]:], ".")
@@ -551,12 +511,15 @@ func normalizeVersionComponent(s string) string {
 // identically. The fallback only has tag names to work with, so the
 // resulting Releases have empty PublishedAt/Body.
 func FetchReleases(owner, repo, installedVersion, targetVersion string) ([]Release, error) {
-	filtered, sawAny, err := fetchReleasePages(owner, repo, installedVersion, targetVersion)
+	releasesURL := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", apiBaseURL, owner, repo)
+	filtered, sawAny, err := fetchPages(releasesURL, func(r Release) Release { return r }, installedVersion, targetVersion)
 	if err != nil {
 		return nil, err
 	}
 	if !sawAny {
-		return fetchTags(owner, repo, installedVersion, targetVersion)
+		tagsURL := fmt.Sprintf("%s/repos/%s/%s/tags?per_page=100", apiBaseURL, owner, repo)
+		filtered, _, err = fetchPages(tagsURL, func(t tagEntry) Release { return Release{TagName: t.Name} }, installedVersion, targetVersion)
+		return filtered, err
 	}
 	return appendLatestIfMissing(owner, repo, filtered, targetVersion), nil
 }
@@ -609,102 +572,39 @@ func accumulateRelease(filtered []Release, r Release, installedVersion, targetVe
 	return filtered, false
 }
 
-func fetchReleasePages(owner, repo, installedVersion, targetVersion string) ([]Release, bool, error) {
-	var filtered []Release
-	sawAny := false
-	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", apiBaseURL, owner, repo)
+type tagEntry struct {
+	Name string `json:"name"`
+}
 
+// fetchPages walks a newest-first list endpoint (releases, or tags for
+// repos that don't use GitHub Releases), feeding each entry through
+// accumulateRelease. Only the first page is fetched when targetVersion is
+// set. sawAny reports whether the endpoint returned any entries at all.
+func fetchPages[T any](url string, toRelease func(T) Release, installedVersion, targetVersion string) (filtered []Release, sawAny bool, err error) {
 	pages := maxReleasePages
 	if targetVersion != "" {
 		pages = 1
 	}
 
 	for page := 0; page < pages && url != ""; page++ {
-		resp, err := get(url)
-		if err != nil {
-			return nil, false, fmt.Errorf("fetching releases for %s/%s: %w", owner, repo, err)
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
+		var entries []T
+		if url, err = getJSONPage(url, &entries); err != nil {
 			return nil, false, err
 		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, false, fmt.Errorf("fetching releases for %s/%s: status %d", owner, repo, resp.StatusCode)
-		}
-
-		var pageReleases []Release
-		if err := json.Unmarshal(body, &pageReleases); err != nil {
-			return nil, false, fmt.Errorf("parsing releases for %s/%s: %w", owner, repo, err)
-		}
-		if len(pageReleases) > 0 {
-			sawAny = true
-		}
-		for _, r := range pageReleases {
+		sawAny = sawAny || len(entries) > 0
+		for _, e := range entries {
 			var stop bool
-			filtered, stop = accumulateRelease(filtered, r, installedVersion, targetVersion)
+			filtered, stop = accumulateRelease(filtered, toRelease(e), installedVersion, targetVersion)
 			if stop {
 				return filtered, sawAny, nil
 			}
 		}
-
-		url = nextPageURL(resp.Header.Get("Link"))
 	}
 
 	if targetVersion != "" && len(filtered) > 20 {
 		filtered = filtered[:20]
 	}
 	return filtered, sawAny, nil
-}
-
-type tagEntry struct {
-	Name string `json:"name"`
-}
-
-// fetchTags mirrors fetchReleasePages against the tags API instead of
-// releases, for repos that don't use GitHub Releases at all.
-func fetchTags(owner, repo, installedVersion, targetVersion string) ([]Release, error) {
-	var filtered []Release
-	url := fmt.Sprintf("%s/repos/%s/%s/tags?per_page=100", apiBaseURL, owner, repo)
-
-	pages := maxReleasePages
-	if targetVersion != "" {
-		pages = 1
-	}
-
-	for page := 0; page < pages && url != ""; page++ {
-		resp, err := get(url)
-		if err != nil {
-			return nil, fmt.Errorf("fetching tags for %s/%s: %w", owner, repo, err)
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("fetching tags for %s/%s: status %d", owner, repo, resp.StatusCode)
-		}
-
-		var tags []tagEntry
-		if err := json.Unmarshal(body, &tags); err != nil {
-			return nil, fmt.Errorf("parsing tags for %s/%s: %w", owner, repo, err)
-		}
-		for _, t := range tags {
-			var stop bool
-			filtered, stop = accumulateRelease(filtered, Release{TagName: t.Name}, installedVersion, targetVersion)
-			if stop {
-				return filtered, nil
-			}
-		}
-
-		url = nextPageURL(resp.Header.Get("Link"))
-	}
-
-	if targetVersion != "" && len(filtered) > 20 {
-		filtered = filtered[:20]
-	}
-	return filtered, nil
 }
 
 var linkNextPattern = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)

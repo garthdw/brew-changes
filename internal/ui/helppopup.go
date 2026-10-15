@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"sort"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -37,13 +37,9 @@ var keyGlyphs = map[string]string{"up": "↑", "down": "↓"}
 // keysForActions returns every key in m currently bound to one of actions,
 // sorted and joined for display (e.g. "K/up").
 func keysForActions(m *keymap.Map, actions []string) string {
-	want := make(map[string]bool, len(actions))
-	for _, a := range actions {
-		want[a] = true
-	}
 	var keys []string
 	for key, action := range m.Actions {
-		if !want[action] {
+		if !slices.Contains(actions, action) {
 			continue
 		}
 		if glyph, ok := keyGlyphs[key]; ok {
@@ -51,7 +47,7 @@ func keysForActions(m *keymap.Map, actions []string) string {
 		}
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	return strings.Join(keys, "/")
 }
 

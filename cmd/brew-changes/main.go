@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/garthdw/brew-changes/internal/changelogconfig"
 	"github.com/garthdw/brew-changes/internal/ghsource"
@@ -39,14 +40,12 @@ func run() error {
 			outdatedFormulae = append(outdatedFormulae, pkg.Name)
 		}
 	}
-	formulaInfos, err := homebrew.ResolveInfoBatch(outdatedFormulae, false)
-	if err != nil {
-		formulaInfos = map[string]homebrew.Info{}
-	}
-	caskInfos, err := homebrew.ResolveInfoBatch(outdatedCasks, true)
-	if err != nil {
-		caskInfos = map[string]homebrew.Info{}
-	}
+	// Errors leave the map nil, which reads as "no info" for every package.
+	var formulaInfos, caskInfos map[string]homebrew.Info
+	var wg sync.WaitGroup
+	wg.Go(func() { formulaInfos, _ = homebrew.ResolveInfoBatch(outdatedFormulae, false) })
+	wg.Go(func() { caskInfos, _ = homebrew.ResolveInfoBatch(outdatedCasks, true) })
+	wg.Wait()
 
 	items := make([]ui.Item, 0, len(packages))
 	for _, pkg := range packages {
@@ -69,7 +68,6 @@ func run() error {
 			// Releases API path instead of fetching that HTML page as if
 			// it were a raw changelog file.
 			owner, repo = relOwner, relRepo
-			hasManualOverride = false
 			manualChangelogURL = ""
 		}
 

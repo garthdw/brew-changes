@@ -34,7 +34,7 @@ Package flow, in the order `cmd/brew-changes/main.go` calls them:
 
 ### UI navigation model (`internal/ui/model.go`)
 
-Arrow keys (`up`/`down`) always move the cursor between items. `j`/`k` are dual-purpose: they scroll the expanded item's changelog body when the highlighted item is expanded, otherwise they move the cursor like the arrow keys. Any cursor-moving key handler must call `m.refreshViewport()` afterward — the rendered content (including the `>` cursor marker and bold-selected styling) is only regenerated on that call, it does not follow `m.cursor` automatically.
+Arrow keys (`up`/`down`) always move the cursor between items. `j`/`k` are dual-purpose: they scroll the expanded item's changelog body when the highlighted item is expanded, otherwise they move the cursor like the arrow keys. Move the cursor via `m.moveCursor`, which calls `m.refreshViewport()` — the rendered content (including the `>` cursor marker and bold-selected styling) is only regenerated on that call, it does not follow `m.cursor` automatically.
 
 ### Release pipeline
 

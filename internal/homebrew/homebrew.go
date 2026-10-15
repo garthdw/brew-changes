@@ -3,11 +3,14 @@
 package homebrew
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -20,84 +23,63 @@ type Package struct {
 	IsCask    bool
 }
 
-type outdatedFormula struct {
-	Name              string   `json:"name"`
-	InstalledVersions []string `json:"installed_versions"`
-	CurrentVersion    string   `json:"current_version"`
-}
-
-type outdatedCask struct {
+type outdatedEntry struct {
 	Name              string   `json:"name"`
 	InstalledVersions []string `json:"installed_versions"`
 	CurrentVersion    string   `json:"current_version"`
 }
 
 type outdatedResult struct {
-	Formulae []outdatedFormula `json:"formulae"`
-	Casks    []outdatedCask    `json:"casks"`
+	Formulae []outdatedEntry `json:"formulae"`
+	Casks    []outdatedEntry `json:"casks"`
 }
 
 // Outdated returns every outdated formula and cask.
 func Outdated() ([]Package, error) {
-	var result outdatedResult
-
-	var formulaResult, caskResult outdatedResult
+	var formulae, casks []Package
 	var formulaErr, caskErr error
-
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		out, err := exec.Command("brew", "outdated", "--json=v2", "--formula").Output()
-		if err != nil {
-			formulaErr = fmt.Errorf("brew outdated --formula: %w", err)
-			return
-		}
-		if err := json.Unmarshal(out, &formulaResult); err != nil {
-			formulaErr = fmt.Errorf("parsing brew outdated --formula output: %w", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		out, err := exec.Command("brew", "outdated", "--json=v2", "--cask").Output()
-		if err != nil {
-			caskErr = fmt.Errorf("brew outdated --cask: %w", err)
-			return
-		}
-		if err := json.Unmarshal(out, &caskResult); err != nil {
-			caskErr = fmt.Errorf("parsing brew outdated --cask output: %w", err)
-		}
-	}()
+	wg.Go(func() { formulae, formulaErr = outdated(false) })
+	wg.Go(func() { casks, caskErr = outdated(true) })
 	wg.Wait()
 
-	if formulaErr != nil {
-		return nil, formulaErr
+	if err := cmp.Or(formulaErr, caskErr); err != nil {
+		return nil, err
 	}
-	if caskErr != nil {
-		return nil, caskErr
-	}
-	result.Formulae = formulaResult.Formulae
-	result.Casks = caskResult.Casks
+	return append(formulae, casks...), nil
+}
 
-	packages := make([]Package, 0, len(result.Formulae)+len(result.Casks))
-	for _, f := range result.Formulae {
+func outdated(isCask bool) ([]Package, error) {
+	flag := kindFlag(isCask)
+	out, err := exec.Command("brew", "outdated", "--json=v2", flag).Output()
+	if err != nil {
+		return nil, fmt.Errorf("brew outdated %s: %w", flag, err)
+	}
+	var result outdatedResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parsing brew outdated %s output: %w", flag, err)
+	}
+	entries := result.Formulae
+	if isCask {
+		entries = result.Casks
+	}
+	packages := make([]Package, 0, len(entries))
+	for _, e := range entries {
 		packages = append(packages, Package{
-			Name:      f.Name,
-			Installed: firstOrEmpty(f.InstalledVersions),
-			Current:   f.CurrentVersion,
-			IsCask:    false,
+			Name:      e.Name,
+			Installed: firstOrEmpty(e.InstalledVersions),
+			Current:   e.CurrentVersion,
+			IsCask:    isCask,
 		})
 	}
-	for _, c := range result.Casks {
-		packages = append(packages, Package{
-			Name:      c.Name,
-			Installed: firstOrEmpty(c.InstalledVersions),
-			Current:   c.CurrentVersion,
-			IsCask:    true,
-		})
-	}
-
 	return packages, nil
+}
+
+func kindFlag(isCask bool) string {
+	if isCask {
+		return "--cask"
+	}
+	return "--formula"
 }
 
 func firstOrEmpty(versions []string) string {
@@ -132,12 +114,9 @@ type caskInfo struct {
 	URL       string `json:"url"`
 }
 
-type formulaInfoResult struct {
+type infoResult struct {
 	Formulae []formulaInfo `json:"formulae"`
-}
-
-type caskInfoResult struct {
-	Casks []caskInfo `json:"casks"`
+	Casks    []caskInfo    `json:"casks"`
 }
 
 // Info is a package's homepage, source/download URL, and current stable
@@ -172,16 +151,9 @@ func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
 	sem := make(chan struct{}, 8)
 	var firstErr error
 
-	for i := 0; i < len(names); i += resolveBatchSize {
-		end := i + resolveBatchSize
-		if end > len(names) {
-			end = len(names)
-		}
-		chunk := names[i:end]
-		wg.Add(1)
+	for chunk := range slices.Chunk(names, resolveBatchSize) {
 		sem <- struct{}{}
-		go func(chunk []string) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			resolved, err := resolveChunk(chunk, isCask)
 			mu.Lock()
@@ -189,10 +161,8 @@ func ResolveInfoBatch(names []string, isCask bool) (map[string]Info, error) {
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
-			for k, v := range resolved {
-				infos[k] = v
-			}
-		}(chunk)
+			maps.Copy(infos, resolved)
+		})
 	}
 	wg.Wait()
 
@@ -224,49 +194,28 @@ func resolveChunk(chunk []string, isCask bool) (map[string]Info, error) {
 	left, _ := resolveChunk(chunk[:mid], isCask)
 	right, _ := resolveChunk(chunk[mid:], isCask)
 	merged := make(map[string]Info, len(left)+len(right))
-	for k, v := range left {
-		merged[k] = v
-	}
-	for k, v := range right {
-		merged[k] = v
-	}
+	maps.Copy(merged, left)
+	maps.Copy(merged, right)
 	return merged, nil
 }
 
 func fetchInfo(names []string, isCask bool) (map[string]Info, error) {
-	infos := make(map[string]Info, len(names))
-
-	if isCask {
-		args := append([]string{"info", "--json=v2", "--cask"}, names...)
-		out, err := exec.Command("brew", args...).Output()
-		if err != nil {
-			return nil, err
-		}
-		var result caskInfoResult
-		if err := json.Unmarshal(out, &result); err != nil {
-			return nil, fmt.Errorf("parsing brew info --cask %v output: %w", names, err)
-		}
-		for _, c := range result.Casks {
-			infos[c.FullToken] = Info{Homepage: c.Homepage, URL: c.URL, Version: c.Version}
-		}
-		return infos, nil
-	}
-
-	args := append([]string{"info", "--json=v2", "--formula"}, names...)
-	out, err := exec.Command("brew", args...).Output()
+	flag := kindFlag(isCask)
+	out, err := exec.Command("brew", append([]string{"info", "--json=v2", flag}, names...)...).Output()
 	if err != nil {
 		return nil, err
 	}
-	var result formulaInfoResult
+	var result infoResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("parsing brew info --formula %v output: %w", names, err)
+		return nil, fmt.Errorf("parsing brew info %s %v output: %w", flag, names, err)
+	}
+
+	infos := make(map[string]Info, len(names))
+	for _, c := range result.Casks {
+		infos[c.FullToken] = Info{Homepage: c.Homepage, URL: c.URL, Version: c.Version}
 	}
 	for _, f := range result.Formulae {
-		url := f.URLs.Stable.URL
-		if url == "" {
-			url = f.URLs.Head.URL
-		}
-		infos[f.FullName] = Info{Homepage: f.Homepage, URL: url, Version: f.Versions.Stable}
+		infos[f.FullName] = Info{Homepage: f.Homepage, URL: cmp.Or(f.URLs.Stable.URL, f.URLs.Head.URL), Version: f.Versions.Stable}
 	}
 	return infos, nil
 }

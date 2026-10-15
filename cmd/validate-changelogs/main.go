@@ -9,15 +9,17 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/garthdw/brew-changes/internal/changelogconfig"
 	"github.com/garthdw/brew-changes/internal/ghsource"
@@ -67,24 +69,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	results := make([]result, 0, len(infos)+len(skipped))
-	for _, r := range skipped {
-		results = append(results, r)
-	}
+	results := slices.Grow(skipped, len(infos))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	for name, info := range infos {
-		wg.Add(1)
 		sem <- struct{}{}
-		go func(name string, info homebrew.Info) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			r := validate(name, info)
 			mu.Lock()
 			results = append(results, r)
 			mu.Unlock()
-		}(name, info)
+		})
 	}
 	wg.Wait()
 
@@ -99,7 +96,7 @@ func main() {
 		}
 	}
 
-	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	slices.SortFunc(results, func(a, b result) int { return cmp.Compare(a.name, b.name) })
 
 	var ok, fail, skip, manual, partial int
 	for _, r := range results {
@@ -129,7 +126,8 @@ func main() {
 }
 
 func topFormulae(n int) ([]string, error) {
-	resp, err := http.Get("https://formulae.brew.sh/api/analytics/install-on-request/365d.json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get("https://formulae.brew.sh/api/analytics/install-on-request/365d.json")
 	if err != nil {
 		return nil, err
 	}
@@ -138,11 +136,8 @@ func topFormulae(n int) ([]string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, err
 	}
-	if n > len(parsed.Items) {
-		n = len(parsed.Items)
-	}
-	names := make([]string, n)
-	for i := 0; i < n; i++ {
+	names := make([]string, min(n, len(parsed.Items)))
+	for i := range names {
 		names[i] = parsed.Items[i].Formula
 	}
 	return names, nil

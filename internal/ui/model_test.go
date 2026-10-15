@@ -105,7 +105,7 @@ func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 	if !nm.items[0].Expanded {
 		t.Error("expected item to be expanded after enter")
 	}
-	if !nm.items[0].Loading {
+	if nm.items[0].LoadingStage == "" {
 		t.Error("expected item to be marked loading since body is empty")
 	}
 	if cmd == nil {
@@ -166,15 +166,15 @@ func TestUpdate_EnterOnEmptyList(t *testing.T) {
 
 func TestUpdate_BodyFetchedMsg(t *testing.T) {
 	m := readyModel(testItems(2))
-	m.items[0].Loading = true
+	m.items[0].LoadingStage = "changelog"
 
 	updated, _ := m.Update(bodyFetchedMsg{index: 0, body: "changelog content"})
 	nm := updated.(model)
 	if nm.items[0].Body != "changelog content" {
 		t.Errorf("got body %q", nm.items[0].Body)
 	}
-	if nm.items[0].Loading {
-		t.Error("expected Loading to be cleared")
+	if nm.items[0].LoadingStage != "" {
+		t.Error("expected LoadingStage to be cleared")
 	}
 }
 
@@ -375,7 +375,7 @@ func TestRenderList_UpgradingShowsIndicator(t *testing.T) {
 }
 
 func TestRenderList_LoadingShowsSpinner(t *testing.T) {
-	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true, LoadingStage: "CHANGELOG.md"}}
+	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, LoadingStage: "CHANGELOG.md"}}
 	m := newModel(items)
 
 	content, _ := m.renderList()
@@ -385,7 +385,7 @@ func TestRenderList_LoadingShowsSpinner(t *testing.T) {
 }
 
 func TestRenderList_LoadingReleasesShowsSpinner(t *testing.T) {
-	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true, LoadingStage: "releases"}}
+	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, LoadingStage: "releases"}}
 	m := newModel(items)
 
 	content, _ := m.renderList()
