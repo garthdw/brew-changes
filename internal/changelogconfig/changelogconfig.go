@@ -7,6 +7,7 @@ package changelogconfig
 import (
 	_ "embed"
 	"encoding/json"
+	"strings"
 )
 
 //go:embed changelog_config.json
@@ -49,4 +50,14 @@ func parse() map[string]Entry {
 // name, or the zero Entry if there is none.
 func Get(name string) Entry {
 	return entries[name]
+}
+
+// ExpandURL substitutes {version}, {major.minor} and {major} in an Entry's
+// URL, for projects that publish notes per release, release branch or
+// major series (git's RelNotes, qemu's ChangeLog/X.Y pages, gcc-N), so
+// entries don't go stale every release.
+func ExpandURL(url, version string) string {
+	parts := strings.SplitN(version, ".", 3)
+	majorMinor := strings.Join(parts[:min(2, len(parts))], ".")
+	return strings.NewReplacer("{version}", version, "{major.minor}", majorMinor, "{major}", parts[0]).Replace(url)
 }

@@ -19,3 +19,10 @@ func TestGet(t *testing.T) {
 		t.Error("Get of an unknown package should return the zero Entry")
 	}
 }
+
+func TestExpandURL(t *testing.T) {
+	got := ExpandURL("https://example.com/v{major}/{major.minor}/notes-{version}.html", "9.0.2")
+	if want := "https://example.com/v9/9.0/notes-9.0.2.html"; got != want {
+		t.Errorf("ExpandURL = %q, want %q", got, want)
+	}
+}
