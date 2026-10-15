@@ -18,11 +18,7 @@ var (
 )
 
 func init() {
-	ApplyTheme(theme.DefaultTheme())
-}
-
-// ApplyTheme rebuilds every package-level style from t.
-func ApplyTheme(t theme.Theme) {
+	t := theme.Default()
 	c := t.Chrome
 
 	styleVersion = theme.Version(t).ApplyTo(lipgloss.NewStyle())

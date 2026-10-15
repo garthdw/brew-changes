@@ -3,10 +3,10 @@ package ghsource
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -80,7 +80,7 @@ func TestResolveRepo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			owner, repo, ok := ResolveRepo(tt.homepage, tt.url)
+			owner, repo, ok := resolveRepo(tt.homepage, tt.url)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -89,6 +89,26 @@ func TestResolveRepo(t *testing.T) {
 			}
 			if owner != tt.wantOwner || repo != tt.wantRepo {
 				t.Errorf("got (%q, %q), want (%q, %q)", owner, repo, tt.wantOwner, tt.wantRepo)
+			}
+		})
+	}
+}
+
+func TestResolveSource(t *testing.T) {
+	tests := []struct {
+		pkg, homepage string
+		want          Source
+	}{
+		{"ripgrep", "https://github.com/BurntSushi/ripgrep", Source{Owner: "BurntSushi", Repo: "ripgrep"}},
+		{"rust", "https://github.com/rust-lang/rust", Source{ManualURL: "https://github.com/rust-lang/rust/blob/master/RELEASES.md"}},
+		{"pnpm", "https://pnpm.io", Source{Owner: "pnpm", Repo: "pnpm"}},
+		{"zed@preview", "https://zed.dev", Source{Owner: "zed-industries", Repo: "zed", PrereleasesOnly: true}},
+		{"tmux", "https://github.com/tmux/tmux", Source{Owner: "tmux", Repo: "tmux", LaxHeadings: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pkg, func(t *testing.T) {
+			if got := ResolveSource(tt.pkg, tt.homepage, ""); got != tt.want {
+				t.Errorf("got %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -167,12 +187,9 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		content, ok, contentType := FetchRaw(srv.URL)
-		if !ok {
-			t.Fatalf("ok = false, want true")
-		}
-		if strings.Contains(contentType, "html") {
-			t.Errorf("contentType = %q, want non-html", contentType)
+		content, err := fetchRaw(srv.URL)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
 		if content != "## 1.2.3\n\nsome notes\n" {
 			t.Errorf("got %q", content)
@@ -186,12 +203,8 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		_, ok, contentType := FetchRaw(srv.URL)
-		if ok {
-			t.Errorf("ok = true, want false for html content-type")
-		}
-		if !strings.Contains(contentType, "html") {
-			t.Errorf("contentType = %q, want html", contentType)
+		if _, err := fetchRaw(srv.URL); !errors.Is(err, ErrHTML) {
+			t.Errorf("err = %v, want ErrHTML", err)
 		}
 	})
 
@@ -201,8 +214,8 @@ func TestFetchRaw(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, ok, _ := FetchRaw(srv.URL); ok {
-			t.Errorf("ok = true, want false for 404")
+		if _, err := fetchRaw(srv.URL); err == nil {
+			t.Error("expected error for 404")
 		}
 	})
 }
@@ -214,9 +227,9 @@ func TestFetchManualSection_NonGitHub(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	section, fetched, found, _ := FetchManualSection(srv.URL, "2.0.0", "1.0.0", false)
-	if !fetched || !found {
-		t.Fatalf("fetched = %v, found = %v, want true, true", fetched, found)
+	section, found, err := FetchManualSection(srv.URL, "2.0.0", "1.0.0", false)
+	if err != nil || !found {
+		t.Fatalf("err = %v, found = %v, want nil, true", err, found)
 	}
 	if section != "## 2.0.0\nnew stuff" {
 		t.Errorf("got %q", section)
@@ -232,9 +245,9 @@ func TestFetchManualSection_GitHubBlobURL(t *testing.T) {
 	// FetchManualSection parses owner/repo/path from the URL itself and
 	// hits apiBaseURL (overridden to srv.URL) rather than the URL's host,
 	// so any github.com blob URL resolves through the test server.
-	section, fetched, found, _ := FetchManualSection("https://github.com/owner/repo/blob/main/CHANGELOG.md", "2.0.0", "1.0.0", false)
-	if !fetched || !found {
-		t.Fatalf("fetched = %v, found = %v, want true, true", fetched, found)
+	section, found, err := FetchManualSection("https://github.com/owner/repo/blob/main/CHANGELOG.md", "2.0.0", "1.0.0", false)
+	if err != nil || !found {
+		t.Fatalf("err = %v, found = %v, want nil, true", err, found)
 	}
 	if section != "## 2.0.0\nnew stuff" {
 		t.Errorf("got %q", section)
@@ -252,7 +265,7 @@ func rootListingHandler(names ...string) http.HandlerFunc {
 	}
 }
 
-func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
+func TestResolveChangelogFilename_PicksFirstMatch(t *testing.T) {
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/contents/":
@@ -267,10 +280,11 @@ func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
 		}
 	})
 
-	filename, content, ok := FetchChangelogFile("o", "r")
+	filename, _, ok, _ := resolveChangelogFilename("o", "r")
 	if !ok {
 		t.Fatal("expected ok = true")
 	}
+	content, _ := fetchGitHubFile("o", "r", filename, "")
 	if filename != "CHANGELOG.md" {
 		t.Errorf("got filename %q, want CHANGELOG.md", filename)
 	}
@@ -279,7 +293,7 @@ func TestFetchChangelogFile_PicksFirstMatch(t *testing.T) {
 	}
 }
 
-func TestFetchChangelogFile_FallsThroughToLaterName(t *testing.T) {
+func TestResolveChangelogFilename_FallsThroughToLaterName(t *testing.T) {
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/o/r/contents/":
@@ -294,16 +308,17 @@ func TestFetchChangelogFile_FallsThroughToLaterName(t *testing.T) {
 		}
 	})
 
-	filename, content, ok := FetchChangelogFile("o", "r")
+	filename, _, ok, _ := resolveChangelogFilename("o", "r")
+	content, _ := fetchGitHubFile("o", "r", filename, "")
 	if !ok || filename != "HISTORY.md" || content != "history notes" {
 		t.Errorf("got (%q, %q, %v), want (HISTORY.md, \"history notes\", true)", filename, content, ok)
 	}
 }
 
-func TestFetchChangelogFile_NoneFound(t *testing.T) {
+func TestResolveChangelogFilename_NoneFound(t *testing.T) {
 	withTestServer(t, rootListingHandler("README.md", "LICENSE"))
 
-	_, _, ok := FetchChangelogFile("o", "r")
+	_, _, ok, _ := resolveChangelogFilename("o", "r")
 	if ok {
 		t.Error("expected ok = false when no changelog file exists")
 	}
@@ -329,7 +344,7 @@ func TestResolveChangelogFilename_MultipleMatchesPicksMostRecentlyCommitted(t *t
 		}
 	})
 
-	filename, found, err := ResolveChangelogFilename("o", "r")
+	filename, _, found, err := resolveChangelogFilename("o", "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -343,7 +358,7 @@ func TestResolveChangelogFilename_ListingError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	_, found, err := ResolveChangelogFilename("o", "r")
+	_, _, found, err := resolveChangelogFilename("o", "r")
 	if err == nil {
 		t.Error("expected error on non-200 listing response")
 	}
@@ -607,27 +622,6 @@ func TestFetchReleases_NoFallbackWhenReleasesExistButNoneAreNewer(t *testing.T) 
 	}
 	if len(releases) != 0 {
 		t.Errorf("got %+v, want none (already up to date)", releases)
-	}
-}
-
-func TestTagMatchesVersion(t *testing.T) {
-	tests := []struct {
-		tag, version string
-		want         bool
-	}{
-		{"1.8.1", "1.8.1", true},
-		{"v1.8.1", "1.8.1", true},
-		{"jq-1.8.1", "1.8.1", true},
-		{"2024-edition-v1.8.1", "1.8.1", true},
-		{"1.2.3", "2.3", false}, // "2.3" is the tail of a longer version, not a real match
-		{"12.3", "2.3", false},  // digit immediately before the suffix
-		{"v1.8.2", "1.8.1", false},
-		{"", "1.8.1", false},
-	}
-	for _, tt := range tests {
-		if got := TagMatchesVersion(tt.tag, tt.version); got != tt.want {
-			t.Errorf("TagMatchesVersion(%q, %q) = %v, want %v", tt.tag, tt.version, got, tt.want)
-		}
 	}
 }
 

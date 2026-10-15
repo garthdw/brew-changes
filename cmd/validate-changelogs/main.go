@@ -9,19 +9,22 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/garthdw/brew-changes/internal/changelogconfig"
 	"github.com/garthdw/brew-changes/internal/ghsource"
 	"github.com/garthdw/brew-changes/internal/homebrew"
+	"github.com/garthdw/brew-changes/internal/version"
 )
 
 type analyticsResponse struct {
@@ -33,10 +36,10 @@ type analyticsResponse struct {
 type result struct {
 	name        string
 	owner, repo string
-	source      string // "file:<name>", "releases", "no-repo", "skip-tap"
+	source      string // "file:<name>", "releases", "manual", "no-repo", "skip-tap"
 	found       bool
 	skipped     bool
-	manual      bool // recovered via changelog_config.json rather than auto-detection
+	manual      bool // resolved via a changelog_config.json URL rather than auto-detection
 	partial     bool // releases fetched, but the target version's tag wasn't among them (best effort)
 	note        string
 }
@@ -67,39 +70,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	results := make([]result, 0, len(infos)+len(skipped))
-	for _, r := range skipped {
-		results = append(results, r)
-	}
+	results := slices.Grow(skipped, len(infos))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	for name, info := range infos {
-		wg.Add(1)
 		sem <- struct{}{}
-		go func(name string, info homebrew.Info) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			r := validate(name, info)
 			mu.Lock()
 			results = append(results, r)
 			mu.Unlock()
-		}(name, info)
+		})
 	}
 	wg.Wait()
 
-	for i := range results {
-		r := &results[i]
-		if r.skipped || r.found {
-			continue
-		}
-		if url, ok := changelogconfig.Lookup(r.name); ok {
-			r.manual = true
-			r.note = "manual: " + url
-		}
-	}
-
-	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	slices.SortFunc(results, func(a, b result) int { return cmp.Compare(a.name, b.name) })
 
 	var ok, fail, skip, manual, partial int
 	for _, r := range results {
@@ -129,7 +116,8 @@ func main() {
 }
 
 func topFormulae(n int) ([]string, error) {
-	resp, err := http.Get("https://formulae.brew.sh/api/analytics/install-on-request/365d.json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get("https://formulae.brew.sh/api/analytics/install-on-request/365d.json")
 	if err != nil {
 		return nil, err
 	}
@@ -138,11 +126,8 @@ func topFormulae(n int) ([]string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, err
 	}
-	if n > len(parsed.Items) {
-		n = len(parsed.Items)
-	}
-	names := make([]string, n)
-	for i := 0; i < n; i++ {
+	names := make([]string, min(n, len(parsed.Items)))
+	for i := range names {
 		names[i] = parsed.Items[i].Formula
 	}
 	return names, nil
@@ -185,13 +170,17 @@ func filterUntapped(names []string) (resolvable []string, skipped []result, err 
 func validate(name string, info homebrew.Info) result {
 	r := result{name: name}
 
-	owner, repo, ok := ghsource.ResolveRepo(info.Homepage, info.URL)
-	if !ok {
+	src := ghsource.ResolveSource(name, info.Homepage, info.URL)
+	owner, repo := src.Owner, src.Repo
+	r.owner, r.repo = owner, repo
+	switch {
+	case src.ManualURL != "":
+		return validateManual(r, src, info.Version)
+	case owner == "":
 		r.source = "no-repo"
 		r.note = fmt.Sprintf("homepage=%s url=%s", info.Homepage, info.URL)
 		return r
 	}
-	r.owner, r.repo = owner, repo
 
 	filename, useReleases := ghsource.ResolveChangelogSource(owner, repo)
 	if useReleases {
@@ -205,7 +194,7 @@ func validate(name string, info homebrew.Info) result {
 			r.note = "no releases found"
 			return r
 		}
-		if last := releases[len(releases)-1]; ghsource.TagMatchesVersion(last.TagName, info.Version) {
+		if last := releases[len(releases)-1]; version.MatchesTag(last.TagName, info.Version) {
 			r.found = true
 			r.note = fmt.Sprintf("matched tag=%s", last.TagName)
 			return r
@@ -216,12 +205,34 @@ func validate(name string, info homebrew.Info) result {
 	}
 
 	r.source = "file:" + filename
-	section, found := ghsource.FetchChangelogSection(owner, repo, filename, info.Version, "", changelogconfig.LaxHeadings(name))
+	section, found := ghsource.FetchChangelogSection(owner, repo, filename, info.Version, "", src.LaxHeadings)
 	r.found = found
 	if !found {
 		r.note = "version heading not located"
 	} else {
 		r.note = fmt.Sprintf("%d bytes", len(section))
+	}
+	return r
+}
+
+// validateManual fetches a configured changelog URL the same way the TUI
+// does. HTML pages count as manual matches, since the TUI shows them as a
+// link to open rather than rendering them.
+func validateManual(r result, src ghsource.Source, version string) result {
+	r.source = "manual"
+	section, found, err := ghsource.FetchManualSection(src.ManualURL, version, "", src.LaxHeadings)
+	switch {
+	case errors.Is(err, ghsource.ErrHTML):
+		r.manual = true
+		r.note = "link only (HTML): " + src.ManualURL
+	case err != nil:
+		r.note = "fetch error: " + err.Error()
+	case !found:
+		r.note = "version heading not located: " + src.ManualURL
+	default:
+		r.manual = true
+		r.found = true
+		r.note = fmt.Sprintf("%d bytes from %s", len(section), src.ManualURL)
 	}
 	return r
 }

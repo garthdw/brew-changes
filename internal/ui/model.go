@@ -4,9 +4,11 @@ package ui
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -29,13 +31,8 @@ type Item struct {
 	Installed string
 	Current   string
 	Homepage  string // package homepage, empty if unknown
-	Owner     string // GitHub owner, empty if no repo could be resolved
-	Repo      string // GitHub repo name
 
-	// ManualChangelogURL is a manually curated changelog/release-notes
-	// link (see internal/changelogconfig) used when no GitHub repo could
-	// be resolved automatically. Empty if none is known.
-	ManualChangelogURL string
+	ghsource.Source
 
 	// ChangelogFilename is the changelog file resolveChangelogCmd found in
 	// the GitHub repo, if any. Set once resolution has happened (which
@@ -43,15 +40,11 @@ type Item struct {
 	// then or if the repo uses releases instead of a changelog file.
 	ChangelogFilename string
 
-	// LaxHeadings relaxes version-heading matching for formulae recorded
-	// in internal/changelogconfig as needing it — e.g. a changelog file
-	// that marks version sections with plain, unmarked lines rather than
-	// Markdown headings.
-	LaxHeadings bool
-
-	Expanded     bool
-	Loading      bool
-	LoadingStage string // "changelog" while resolving/fetching the changelog file, or "releases" once falling back to release notes
+	Expanded bool
+	// LoadingStage is non-empty while the body is being fetched: "changelog"
+	// while resolving the source, the changelog filename while fetching it,
+	// or "releases" once falling back to release notes.
+	LoadingStage string
 	Body         string // rendered changelog/releases content, empty until fetched
 
 	// Upgrading, Upgraded, and UpgradeErr track an in-place single-package
@@ -77,8 +70,8 @@ func (it Item) GitHubURL() string {
 // releases page as a reasonable default before/without that resolution.
 // Empty if no GitHub repo could be resolved and no manual override exists.
 func (it Item) ChangelogURL() string {
-	if it.ManualChangelogURL != "" {
-		return it.ManualChangelogURL
+	if it.ManualURL != "" {
+		return it.ManualURL
 	}
 	if it.Owner == "" {
 		return ""
@@ -160,7 +153,7 @@ func Run(items []Item) (Result, error) {
 }
 
 func (m model) Init() tea.Cmd {
-	return m.spinner.Tick
+	return nil
 }
 
 type bodyFetchedMsg struct {
@@ -184,17 +177,17 @@ type changelogResolvedMsg struct {
 // filename with its own round trip.
 func resolveChangelogCmd(index int, it Item) tea.Cmd {
 	return func() tea.Msg {
-		if it.ManualChangelogURL != "" {
-			section, fetched, _, contentType := ghsource.FetchManualSection(it.ManualChangelogURL, it.Current, it.Installed, it.LaxHeadings)
-			if !fetched {
+		if it.ManualURL != "" {
+			section, _, err := ghsource.FetchManualSection(it.ManualURL, it.Current, it.Installed, it.LaxHeadings)
+			if err != nil {
 				reason := "Could not fetch the configured changelog URL."
-				if strings.Contains(contentType, "html") {
+				if errors.Is(err, ghsource.ErrHTML) {
 					reason = "The configured changelog is an HTML page, which can't be rendered here."
 				}
-				body := reason + "\n\n" + renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualChangelogURL))
+				body := reason + "\n\n" + renderMarkdown(fmt.Sprintf("Known changelog: %s", it.ManualURL))
 				return bodyFetchedMsg{index: index, body: body}
 			}
-			body := fmt.Sprintf("(from %s)", it.ManualChangelogURL) + "\n\n" + renderMarkdown(section)
+			body := fmt.Sprintf("(from %s)", it.ManualURL) + "\n\n" + renderMarkdown(section)
 			return bodyFetchedMsg{index: index, body: body}
 		}
 		if it.Owner == "" {
@@ -237,7 +230,7 @@ func fetchReleasesCmd(index int, it Item) tea.Cmd {
 		if err != nil || len(releases) == 0 {
 			return bodyFetchedMsg{index: index, body: "No changelog file or GitHub releases found for this package."}
 		}
-		if strings.HasSuffix(it.Name, "@preview") {
+		if it.PrereleasesOnly {
 			releases = filterPrereleases(releases)
 			if len(releases) == 0 {
 				return bodyFetchedMsg{index: index, body: "No GitHub pre-releases found for this package."}
@@ -255,9 +248,8 @@ func fetchReleasesCmd(index int, it Item) tea.Cmd {
 	}
 }
 
-// filterPrereleases keeps only GitHub-flagged pre-releases, for "@preview"
-// packages (e.g. zed@preview) whose release history is interleaved with the
-// stable channel's releases.
+// filterPrereleases keeps only GitHub-flagged pre-releases (see
+// ghsource.Source.PrereleasesOnly).
 func filterPrereleases(releases []ghsource.Release) []ghsource.Release {
 	filtered := releases[:0]
 	for _, r := range releases {
@@ -285,8 +277,12 @@ func upgradePackage(index int, it Item) tea.Cmd {
 	}
 }
 
-// openURL opens url in the user's default browser via macOS's `open`.
+// openURL opens url in the user's default browser via macOS's `open`, or
+// does nothing if url is empty.
 func openURL(url string) tea.Cmd {
+	if url == "" {
+		return nil
+	}
 	return func() tea.Msg {
 		_ = exec.Command("open", url).Start()
 		return nil
@@ -336,10 +332,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		vpHeight := msg.Height - headerLines - footerLines
-		if vpHeight < 1 {
-			vpHeight = 1
-		}
+		vpHeight := max(msg.Height-headerLines-footerLines, 1)
 		if !m.ready {
 			m.viewport = viewport.New(viewport.WithWidth(msg.Width), viewport.WithHeight(vpHeight))
 			m.ready = true
@@ -368,18 +361,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "move-up":
 			m.moveCursor(-1)
-			m.refreshViewport()
 
 		case "move-down":
 			m.moveCursor(1)
-			m.refreshViewport()
 
 		case "move-up-or-scroll-up":
 			if len(m.items) > 0 && m.items[m.cursor].Expanded {
 				m.viewport.ScrollUp(1)
 			} else {
 				m.moveCursor(-1)
-				m.refreshViewport()
 			}
 
 		case "move-down-or-scroll-down":
@@ -387,7 +377,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.ScrollDown(1)
 			} else {
 				m.moveCursor(1)
-				m.refreshViewport()
 			}
 
 		case "toggle-expand":
@@ -396,49 +385,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			it := &m.items[m.cursor]
 			it.Expanded = !it.Expanded
-			if it.Expanded && it.Body == "" && !it.Loading {
-				it.Loading = true
+			var cmd tea.Cmd
+			if it.Expanded && it.Body == "" && it.LoadingStage == "" {
 				it.LoadingStage = "changelog"
-				m.refreshViewport()
-				m.scrollToCursor()
-				return m, resolveChangelogCmd(m.cursor, *it)
+				cmd = tea.Batch(resolveChangelogCmd(m.cursor, *it), m.spinner.Tick)
 			}
 			m.refreshViewport()
 			m.scrollToCursor()
+			return m, cmd
 
 		case "open-homepage":
 			if len(m.items) == 0 {
 				return m, nil
 			}
 			it := m.items[m.cursor]
-			url := it.Homepage
-			if url == "" {
-				url = it.GitHubURL()
-			}
-			if url == "" {
-				return m, nil
-			}
-			return m, openURL(url)
+			return m, openURL(cmp.Or(it.Homepage, it.GitHubURL()))
 
 		case "open-github":
 			if len(m.items) == 0 {
 				return m, nil
 			}
-			url := m.items[m.cursor].GitHubURL()
-			if url == "" {
-				return m, nil
-			}
-			return m, openURL(url)
+			return m, openURL(m.items[m.cursor].GitHubURL())
 
 		case "open-changelog":
 			if len(m.items) == 0 {
 				return m, nil
 			}
-			url := m.items[m.cursor].ChangelogURL()
-			if url == "" {
-				return m, nil
-			}
-			return m, openURL(url)
+			return m, openURL(m.items[m.cursor].ChangelogURL())
 
 		case "upgrade-all":
 			for i := range m.items {
@@ -461,7 +434,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it.UpgradeErr = ""
 			m.refreshViewport()
 			m.scrollToCursor()
-			return m, upgradePackage(m.cursor, *it)
+			return m, tea.Batch(upgradePackage(m.cursor, *it), m.spinner.Tick)
 		}
 
 	case changelogResolvedMsg:
@@ -481,7 +454,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bodyFetchedMsg:
 		if msg.index >= 0 && msg.index < len(m.items) {
 			m.items[msg.index].Body = msg.body
-			m.items[msg.index].Loading = false
 			m.items[msg.index].LoadingStage = ""
 			m.refreshViewport()
 		}
@@ -499,32 +471,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case spinner.TickMsg:
+		// Let the tick loop lapse while idle; it's restarted (deduped by the
+		// spinner's tag) whenever a load or upgrade begins.
+		if !slices.ContainsFunc(m.items, func(it Item) bool { return it.LoadingStage != "" || it.Upgrading }) {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		for _, it := range m.items {
-			if it.Loading || it.Upgrading {
-				m.refreshViewport()
-				break
-			}
-		}
+		m.refreshViewport()
 		return m, cmd
 	}
 
 	return m, nil
 }
 
-// moveCursor moves the highlighted item by delta and scrolls it into view.
+// moveCursor moves the highlighted item by delta, re-renders the list so the
+// cursor marker follows, and scrolls it into view.
 func (m *model) moveCursor(delta int) {
 	if len(m.items) == 0 {
 		return
 	}
-	m.cursor += delta
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
-	if m.cursor > len(m.items)-1 {
-		m.cursor = len(m.items) - 1
-	}
+	m.cursor = min(max(m.cursor+delta, 0), len(m.items)-1)
+	m.refreshViewport()
 	m.scrollToCursor()
 }
 
@@ -648,7 +616,7 @@ func (m model) renderList() (string, []int) {
 		sourceHint := hintStyle.Render("[no changelog source]")
 		if it.Owner != "" {
 			sourceHint = hintStyle.Render(fmt.Sprintf("[%s/%s]", it.Owner, it.Repo))
-		} else if it.ManualChangelogURL != "" {
+		} else if it.ManualURL != "" {
 			sourceHint = hintStyle.Render("[known changelog]")
 		}
 
@@ -670,15 +638,14 @@ func (m model) renderList() (string, []int) {
 			nameKind = styleSelected.Render(nameKind)
 		}
 
-		line := fmt.Sprintf("%s%s  %s -> %s  %s%s",
+		writeLine(fmt.Sprintf("%s%s  %s -> %s  %s%s",
 			cursor, nameKind,
 			versionStyle.Render(it.Installed), versionStyle.Render(it.Current),
-			sourceHint, statusTag)
-		writeLine(line)
+			sourceHint, statusTag))
 
 		if it.Expanded {
 			switch {
-			case it.Loading:
+			case it.LoadingStage != "":
 				var content string
 				if it.LoadingStage == "releases" {
 					content = m.spinner.View() + " fetching releases..."

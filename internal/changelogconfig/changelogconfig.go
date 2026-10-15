@@ -7,58 +7,46 @@ package changelogconfig
 import (
 	_ "embed"
 	"encoding/json"
-	"sync"
 )
 
 //go:embed changelog_config.json
 var data []byte
 
-// entry is one formula's configuration. URL is a manual changelog/release
+// Entry is one formula's configuration. URL is a manual changelog/release
 // notes link used when auto-detection can't find (or shouldn't be trusted
-// for) the real changelog. LaxHeadings opts into a looser version-heading
-// match for formulae whose auto-detected changelog file uses unmarked
-// plain-text section headers rather than Markdown ATX/Setext headings.
-type entry struct {
+// for) the real changelog. Repo ("owner/repo") names a GitHub repo that
+// auto-detection can't find from Homebrew's metadata. LaxHeadings opts into
+// a looser version-heading match for formulae whose auto-detected changelog
+// file uses unmarked plain-text section headers rather than Markdown
+// ATX/Setext headings. Prerelease restricts release notes to GitHub-flagged
+// pre-releases, for preview channels.
+type Entry struct {
 	URL         string `json:"url"`
+	Repo        string `json:"repo"`
 	LaxHeadings bool   `json:"lax_headings"`
+	Prerelease  bool   `json:"prerelease"`
 }
 
-var (
-	once    sync.Once
-	entries map[string]entry
-)
+var entries = parse()
 
-func load() map[string]entry {
-	once.Do(func() {
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err != nil {
-			entries = map[string]entry{}
-			return
-		}
-		delete(raw, "_comment")
-		entries = make(map[string]entry, len(raw))
-		for name, msg := range raw {
-			var e entry
-			if err := json.Unmarshal(msg, &e); err == nil {
-				entries[name] = e
-			}
-		}
-	})
-	return entries
-}
-
-// Lookup returns the known changelog URL for a Homebrew formula or cask
-// name, if one is recorded.
-func Lookup(name string) (url string, ok bool) {
-	e, found := load()[name]
-	if !found || e.URL == "" {
-		return "", false
+func parse() map[string]Entry {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
 	}
-	return e.URL, true
+	delete(raw, "_comment")
+	parsed := make(map[string]Entry, len(raw))
+	for name, msg := range raw {
+		var e Entry
+		if err := json.Unmarshal(msg, &e); err == nil {
+			parsed[name] = e
+		}
+	}
+	return parsed
 }
 
-// LaxHeadings reports whether name's changelog file should be matched with
-// a looser version-heading rule (see entry.LaxHeadings).
-func LaxHeadings(name string) bool {
-	return load()[name].LaxHeadings
+// Get returns the configuration recorded for a Homebrew formula or cask
+// name, or the zero Entry if there is none.
+func Get(name string) Entry {
+	return entries[name]
 }

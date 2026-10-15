@@ -9,6 +9,8 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/garthdw/brew-changes/internal/ghsource"
 )
 
 func testItems(n int) []Item {
@@ -105,7 +107,7 @@ func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 	if !nm.items[0].Expanded {
 		t.Error("expected item to be expanded after enter")
 	}
-	if !nm.items[0].Loading {
+	if nm.items[0].LoadingStage == "" {
 		t.Error("expected item to be marked loading since body is empty")
 	}
 	if cmd == nil {
@@ -124,7 +126,7 @@ func TestUpdate_EnterTogglesExpandedAndTriggersFetch(t *testing.T) {
 }
 
 func TestResolveChangelogCmd_NoRepoWithManualURL(t *testing.T) {
-	it := Item{Name: "rust", ManualChangelogURL: "https://example.com/rust/RELEASES.md"}
+	it := Item{Name: "rust", Source: ghsource.Source{ManualURL: "https://example.com/rust/RELEASES.md"}}
 	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
 	if !strings.Contains(msg.body, "https://example.com/rust/RELEASES.md") {
 		t.Errorf("expected body to mention the manual changelog URL, got %q", msg.body)
@@ -138,7 +140,7 @@ func TestResolveChangelogCmd_ManualURLServesHTML(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	it := Item{Name: "rust", ManualChangelogURL: srv.URL}
+	it := Item{Name: "rust", Source: ghsource.Source{ManualURL: srv.URL}}
 	msg := resolveChangelogCmd(0, it)().(bodyFetchedMsg)
 	if !strings.Contains(msg.body, "HTML page") {
 		t.Errorf("expected body to mention the HTML-specific reason, got %q", msg.body)
@@ -166,15 +168,15 @@ func TestUpdate_EnterOnEmptyList(t *testing.T) {
 
 func TestUpdate_BodyFetchedMsg(t *testing.T) {
 	m := readyModel(testItems(2))
-	m.items[0].Loading = true
+	m.items[0].LoadingStage = "changelog"
 
 	updated, _ := m.Update(bodyFetchedMsg{index: 0, body: "changelog content"})
 	nm := updated.(model)
 	if nm.items[0].Body != "changelog content" {
 		t.Errorf("got body %q", nm.items[0].Body)
 	}
-	if nm.items[0].Loading {
-		t.Error("expected Loading to be cleared")
+	if nm.items[0].LoadingStage != "" {
+		t.Error("expected LoadingStage to be cleared")
 	}
 }
 
@@ -375,7 +377,7 @@ func TestRenderList_UpgradingShowsIndicator(t *testing.T) {
 }
 
 func TestRenderList_LoadingShowsSpinner(t *testing.T) {
-	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true, LoadingStage: "CHANGELOG.md"}}
+	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, LoadingStage: "CHANGELOG.md"}}
 	m := newModel(items)
 
 	content, _ := m.renderList()
@@ -385,7 +387,7 @@ func TestRenderList_LoadingShowsSpinner(t *testing.T) {
 }
 
 func TestRenderList_LoadingReleasesShowsSpinner(t *testing.T) {
-	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, Loading: true, LoadingStage: "releases"}}
+	items := []Item{{Name: "alpha", Kind: "formula", Expanded: true, LoadingStage: "releases"}}
 	m := newModel(items)
 
 	content, _ := m.renderList()

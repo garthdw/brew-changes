@@ -61,7 +61,7 @@ func TestFormulaInfo_Unmarshal_PrefersStableURL(t *testing.T) {
 		]
 	}`
 
-	var result formulaInfoResult
+	var result infoResult
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestCaskInfo_Unmarshal(t *testing.T) {
 		]
 	}`
 
-	var result caskInfoResult
+	var result infoResult
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
